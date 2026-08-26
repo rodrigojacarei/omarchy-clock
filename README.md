@@ -1,120 +1,151 @@
-# Omarchy Clock 󰃭
+# Omarchy Clock 📅
 
-A feature-rich, beautiful Clock, Calendar, Agenda, and Google Calendar Two-Way Cloud Sync plugin for **[Omarchy Linux](https://omarchy.org/)**.
+A feature-rich, modern Clock, Month Calendar, Agenda, and Google Calendar Two-Way Cloud Sync plugin for **[Omarchy Linux](https://omarchy.org/)**.
 
-Designed specifically for the Omarchy status bar and Quickshell desktop environment, following Omarchy's design language, typography, and interactive keyboard/mouse controls.
+> **Note**: This plugin is **derived from and built upon Omarchy's official built-in clock plugin (`omarchy.clock`)**, heavily enhanced with Google Calendar OAuth 2.0 two-way cloud synchronization, Google Meet 1-click video call integration, recurrence engine, and persistent desktop notifications.
 
 <div align="center">
-  <img src="preview.png" alt="Omarchy Clock & Calendar" width="560" />
+  <img src="preview.png" alt="Omarchy Clock & Calendar" width="700" />
 </div>
 
 <p align="center">
-  <em>Live top-bar upcoming countdown, interactive month calendar, Google Calendar 2-Way Sync, Google Meet 1-click Join, and persistent desktop notifications.</em>
+  <em>Live top-bar upcoming event countdown, interactive month calendar, Google Calendar 2-Way Sync, Google Meet 1-click Join, and persistent desktop notifications.</em>
 </p>
 
 ---
 
 ## ✨ Features
 
-- **Status Bar Clock & Upcoming Event Countdown**:
-  - Live clock with customizable date/time formats and vertical layout support.
-  - Optional upcoming event title and time countdown displayed right beside the clock on the top bar.
-  - Google Meet indicator icon (`󰕧`) for meetings with video calls.
+### 🕒 Status Bar Clock & Upcoming Event Countdown
+- **Live Clock Display**: Configurable 12h/24h formats, date displays, and vertical bar layout support.
+- **Next Event Preview**: Displays your upcoming event title and time countdown directly beside the clock on the top status bar.
+- **Meeting Indicator**: Shows a video camera icon (`📹`) when the upcoming event has a Google Meet or conference link.
 
-- **Full Month Calendar & Navigation**:
-  - Clean monthly date grid with ISO week numbers.
-  - Dot indicators on dates with scheduled events, color-coded by calendar.
-  - Jump to today with one click or hotkey (`T`).
-  - Toggle week start between **Monday** and **Sunday** (`W`).
-  - Fast month/year navigation via arrow buttons or keyboard shortcuts (`[` / `]` for months, `{` / `}` for years).
-
-- **Today & Tomorrow's Agenda Schedule**:
-  - Detailed daily timeline showing start/end times and calendar tags.
-  - Separate, styled **Tomorrow's Schedule** section.
-  - **1-Click Google Meet Join**: Events with Google Meet or video conference URLs display an interactive green **`Join`** button to open the call directly in your browser.
-  - Toggle to show only upcoming events or keep past events visible.
-
-- **Event Creation with Recurrence & Google Meet**:
-  - In-panel event creator for both local and Google Cloud calendars.
-  - **Recurrence Engine**: Create repeating rules (Daily, Weekly on selected days, Monthly on day of month or nth weekday, Yearly) with optional end date or occurrence limit.
-  - **Generate Meeting Link**: Toggle to automatically provision a Google Meet video conference link via Google Calendar API.
-
-- **Smart Recurring Event Deletion**:
-  - When deleting repeating events, an interactive dialog offers 3 standard calendar scopes:
-    - `󰄲` **This event only**: Cancels only the selected occurrence on that date.
-    - `󰒭` **This and all following events**: Stops recurrence starting from this date forward.
-    - `󰆴` **All events in the series**: Permanently deletes the entire recurring series.
-
-- **Desktop Reminders & Notifications**:
-  - Background notification checker monitoring upcoming meetings and events.
-  - Interactive toast notifications with **`󰕧 Join Meeting`** action buttons.
-  - Configurable advance reminder time: **`5 min`**, **`10 min`** *(default)*, **`15 min`**, or **`30 min`**.
-  - **Stay on Screen Until Clicked (Persistent Mode)**: Keeps reminders visible until clicked or dismissed so you never miss a meeting.
-
-- **Two-Way Google Cloud Sync (OAuth 2.0)**:
-  - Direct integration with Google Calendar API v3.
-  - Real-time two-way synchronization: events created, edited, or deleted in the clock update instantly on Google Cloud and your phone.
-  - Multi-calendar selector and visibility filters.
-  - Configurable background auto-sync frequency (**`1 min`**, **`2 min`** *(default)*, **`5 min`**, **`15 min`**).
-
-- **Read-Only iCal / Webcal Feed Support**:
-  - Subscribe to any public or private `.ics` calendar URL (Google Calendar secret address, Outlook, Apple Calendar, Fastmail).
+<div align="center">
+  <img src="assets/preview_bar.png" alt="Top Bar Countdown" width="600" />
+  <p><em>Top status bar displaying live date/time alongside the upcoming event countdown</em></p>
+</div>
 
 ---
 
-## ⚡ Google Calendar Two-Way Sync Setup
+### 🗓️ Full Month Calendar & Agenda
+- **Interactive Calendar Grid**: Clean monthly layout with ISO week numbers and color-coded event indicator dots.
+- **Keyboard Navigation**: Fast navigation via hotkeys (`[` / `]` for months, `{` / `}` for years, `T` for today, `W` to toggle week start between Monday and Sunday).
+- **Today & Tomorrow's Agenda**: Clean event cards showing start/end times, calendar badges, locations, and descriptions.
+- **1-Click Google Meet Join**: Events with meeting links feature a green **`Join`** button to open the call directly in your browser.
 
-You can connect your Google Calendar using either the fast CLI workflow or the Google Cloud Console web interface:
+<div align="center">
+  <img src="assets/preview_panel.png" alt="Calendar and Agenda View" width="560" />
+</div>
 
-### Option A: Fast Setup via Google Workspace CLI (`gws`) / Google Cloud CLI
+---
 
-If you use the [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli) or Google Cloud SDK (`gcloud`), you can provision your OAuth 2.0 Client ID directly from your terminal:
+### 📝 Event Creation & Smart Recurrence Rules
+- **Local & Google Cloud Event Creation**: Add events locally or sync them directly to your Google Calendar account.
+- **Advanced Recurrence Engine**: Set events to repeat **Daily**, **Weekly** on specific days (e.g. Mon, Wed, Fri), **Monthly** (by day of month or nth weekday), or **Yearly**, with optional end dates (`UNTIL`) or count limits.
+- **Generate Meeting Link**: Toggle to automatically provision a Google Meet video conference link for the new event.
+
+<div align="center">
+  <img src="assets/preview_addevent.png" alt="Add Event Drawer" width="560" />
+  <p><em>Add event drawer with custom recurrence rules and Google Meet generation</em></p>
+</div>
+
+---
+
+### 🗑️ Smart Recurring Event Deletion
+When deleting a repeating event, an interactive dialog prompts you to choose the exact deletion scope:
+- **This event only**: Cancels and removes only the selected occurrence on that date.
+- **This and all following events**: Truncates the recurrence rule so future occurrences stop.
+- **All events in the series**: Permanently deletes every occurrence in the repeating series.
+
+---
+
+### 🔔 Persistent Desktop Notifications & Reminders
+- **Background Reminder Engine**: Monitors upcoming meetings without requiring the panel to stay open.
+- **1-Click Action**: Notifications include a **`Join Meeting`** action that opens video calls directly in your browser.
+- **Advance Reminder Options**: Choose when to be alerted: **5 min**, **10 min** *(default)*, **15 min**, or **30 min** before events.
+- **Stay on Screen Until Clicked (Persistent Mode)**: Keeps reminders visible on your screen until clicked or dismissed so you never miss a meeting.
+
+---
+
+### 🔄 Google Cloud Two-Way Sync (OAuth 2.0)
+- **Real-Time 2-Way Sync**: Changes made in Omarchy update immediately on Google Calendar servers and your mobile devices.
+- **Multi-Calendar Filtering**: Toggle visibility and custom colors for individual Google Calendars and iCal feeds.
+- **Configurable Auto-Sync Cadence**: Choose background auto-sync frequency (**1 min**, **2 min** *(default)*, **5 min**, or **15 min**).
+
+<div align="center">
+  <img src="assets/preview_settings.png" alt="Settings & Google Cloud Sync" width="560" />
+  <p><em>Settings view with Google Cloud OAuth 2.0 status, sync frequency, and notification preferences</em></p>
+</div>
+
+---
+
+## ⚡ Google Calendar Setup Guide
+
+### Option A: Fast Setup via Google Workspace CLI (`gws`)
+
+You can use the official community [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli) to configure OAuth credentials directly from your terminal:
 
 ```bash
-# 1. Create a project (or use existing)
+# 1. Install Google Workspace CLI
+npm install -g @googleworkspace/cli
+
+# 2. Run guided setup to configure Google Cloud project & OAuth credentials
+gws auth setup
+
+# 3. Authenticate with Google Calendar
+gws auth login --services calendar
+```
+
+After setup, copy your **Client ID** and **Client Secret** into the Clock panel settings (**Settings ⚙️** → **Configure Client ID & Secret**), or place `client_secret.json` in `~/.config/omarchy-clock/client_secret.json`.
+
+---
+
+### Option B: Fast Setup via Google Cloud CLI (`gcloud`)
+
+```bash
+# 1. Create a project and set as active
 gcloud projects create omarchy-calendar-sync --name="Omarchy Calendar"
 gcloud config set project omarchy-calendar-sync
 
 # 2. Enable Google Calendar API
 gcloud services enable calendar-json.googleapis.com
 
-# 3. Create OAuth Desktop credentials and export client_secret.json
+# 3. Create desktop OAuth client
 gcloud iam oauth-client-ids create omarchy-clock \
   --project=omarchy-calendar-sync \
   --client-type=desktop-app \
   --description="Omarchy Clock Desktop Client"
 ```
 
-Save the downloaded JSON file as `~/.config/omarchy-clock/client_secret.json`, or open the Clock Settings in your panel and paste the **Client ID** and **Client Secret**.
-
 ---
 
-### Option B: Step-by-Step Google Cloud Console (Web GUI)
+### Option C: Manual Google Cloud Console Setup (Web GUI)
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (e.g. `Omarchy Calendar`).
-3. In **APIs & Services** → **Library**, search for **Google Calendar API** and click **Enable**.
-4. In **APIs & Services** → **OAuth consent screen**:
-   - Select **External** (or Internal for Workspace).
-   - Fill in the App name (e.g. `Omarchy Clock`) and your email.
+3. Under **APIs & Services** → **Library**, search for **Google Calendar API** and click **Enable**.
+4. Under **APIs & Services** → **OAuth consent screen**:
+   - Select **External** (or Internal for Google Workspace).
+   - Enter an App name (e.g. `Omarchy Clock`) and your email address.
    - Under **Scopes**, add `https://www.googleapis.com/auth/calendar`.
-   - In **Test users**, add your Google email address.
-5. In **APIs & Services** → **Credentials**:
+   - Under **Test users**, add your Google email address.
+5. Under **APIs & Services** → **Credentials**:
    - Click **Create Credentials** → **OAuth client ID**.
    - Select **Application type**: `Desktop app`.
    - Click **Create**.
-6. Open the clock panel in Omarchy, click **Settings (󰒓)** → **Configure Client ID & Secret**, and paste your credentials.
+6. Open your Clock panel in Omarchy, click **Settings (⚙️)** → **Configure Client ID & Secret**, and paste your credentials.
 7. Click **`Connect with Google`** to sign in through your browser.
 
 ---
 
-### Option C: Instant Read-Only Sync (Secret iCal URL)
+### Option D: Instant Read-Only Sync (Secret iCal URL)
 
 If you only need to view events without creating/editing:
 1. Open [Google Calendar](https://calendar.google.com/) in your browser.
 2. Go to **Settings** → click your calendar under *Settings for my calendars*.
 3. Scroll to **Integrate calendar** and copy the **Secret address in iCal format** (`https://calendar.google.com/calendar/ical/.../basic.ics`).
-4. Open the clock panel, click **Settings (󰒓)** → **Add iCal Subscription URL**, and paste the URL.
+4. Open the Clock panel, click **Settings (⚙️)** → **Add iCal Subscription URL**, and paste the URL.
 
 ---
 
@@ -146,7 +177,7 @@ omarchy plugin enable omarchy-clock --section center
 
 ## ⌨️ Keyboard Shortcuts & Hyprland Keybindings
 
-### In-Panel Shortcuts
+### In-Panel Keyboard Shortcuts
 | Key | Action |
 | :--- | :--- |
 | `[` / `]` | Previous / Next Month |
@@ -157,8 +188,8 @@ omarchy plugin enable omarchy-clock --section center
 | `S` | Open Settings & Calendars View |
 | `Esc` | Close Drawer / Dismiss Popup |
 
-### Hyprland Keybindings (Optional)
-Add to your `~/.config/hypr/bindings.conf`:
+### Hyprland Keybinding (Optional)
+Add to `~/.config/hypr/bindings.conf`:
 
 ```ini
 # Toggle Clock & Calendar popup
@@ -181,8 +212,9 @@ omarchy-clock logout         # Disconnect Google Cloud account
 
 ---
 
-## 📄 License
+## 📄 License & Credits
 
 MIT License. See [LICENSE](LICENSE) for details.
 
-Developed with ❤️ by **[rodrigojacarei](https://github.com/rodrigojacarei)** for the Omarchy Linux community.
+- **Author**: [rodrigojacarei](https://github.com/rodrigojacarei)
+- **Base Widget**: Derived from and built upon Omarchy's official built-in clock plugin (`omarchy.clock`).
