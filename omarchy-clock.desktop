@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Omarchy Clock
+GenericName=Calendar & Google Calendar Sync
+Comment=Clock, calendar and Google Calendar integration for Omarchy
+Exec=omarchy-clock toggle
+Icon=appointment-soon
+Terminal=false
+Categories=Utility;Calendar;Clock;
+Keywords=clock;calendar;google;events;meet;agenda;

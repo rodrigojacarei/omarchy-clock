@@ -1,0 +1,21 @@
+#!/bin/bash
+# Omarchy Clock Desktop Notification Dispatcher
+GLYPH="$1"
+TITLE="$2"
+BODY="$3"
+MEET_URL="$4"
+URGENCY="${5:-critical}"
+
+# Convert literal \n sequences into real newlines
+BODY=$(printf '%b' "$BODY")
+
+if [ -x "/usr/share/omarchy/bin/omarchy-notification-send" ]; then
+  if [ -n "$MEET_URL" ]; then
+    /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰕧}" -u "$URGENCY" "$TITLE" "$BODY" --exec xdg-open "$MEET_URL" 2>/dev/null
+  else
+    /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰃭}" -u "$URGENCY" "$TITLE" "$BODY" 2>/dev/null
+  fi
+else
+  # Fallback to notify-send with -t 0 (no timeout)
+  notify-send -a "omarchy-action" -i "appointment-soon" -u "$URGENCY" -t 0 "$TITLE" "$BODY" 2>/dev/null
+fi

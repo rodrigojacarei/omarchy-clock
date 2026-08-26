@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""
+Google Calendar Two-Way Multi-Calendar Cloud Sync CLI for Omarchy Clock.
+Handles OAuth 2.0 authentication, listing all calendars in account,
+fetching events across all calendars, adding and deleting events.
+"""
+
+import sys
+import os
+import json
+import urllib.request
+import urllib.parse
+import urllib.error
+import http.server
+import socketserver
+import subprocess
+import threading
+import uuid
+from datetime import datetime, timedelta, timezone
+
+CONFIG_DIR = os.path.expanduser("~/.config/omarchy-clock")
+AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
+CLIENT_FILE = os.path.join(CONFIG_DIR, "client.json")
+CACHE_DIR = os.path.expanduser("~/.cache/omarchy/clock")
+API_CACHE_FILE = os.path.join(CACHE_DIR, "api_events.json")
+CLOUD_CALS_FILE = os.path.join(CACHE_DIR, "cloud_calendars.json")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.readonly"
+]
+
+def load_client_credentials():
+    client_id = ""
+    client_secret = ""
+    if os.path.exists(CLIENT_FILE):
+        try:
+            with open(CLIENT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "installed" in data:
+                    data = data["installed"]
+                elif "web" in data:
+                    data = data["web"]
+                client_id = data.get("client_id", "")
+                client_secret = data.get("client_secret", "")
+        except Exception:
+            pass
+    return client_id, client_secret
+
+def save_client_credentials(client_id, client_secret):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CLIENT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"client_id": client_id, "client_secret": client_secret}, f, indent=2)
+
+def load_auth():
+    if os.path.exists(AUTH_FILE):
+        try:
+            with open(AUTH_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+def save_auth(auth_data):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(AUTH_FILE, "w", encoding="utf-8") as f:
+        json.dump(auth_data, f, indent=2)
+
+def get_valid_access_token():
+    auth = load_auth()
+    if not auth or "refresh_token" not in auth:
+        return None
+
+    expiry = auth.get("expiry_timestamp", 0)
+    now = datetime.now(timezone.utc).timestamp()
+
+    if auth.get("access_token") and expiry > (now + 60):
+        return auth["access_token"]
+
+    client_id, client_secret = load_client_credentials()
+    if not client_id or not client_secret:
+        return None
+
+    try:
+        data = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": auth["refresh_token"],
+            "grant_type": "refresh_token"
+        }).encode("utf-8")
+
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            token_resp = json.loads(resp.read().decode("utf-8"))
+            auth["access_token"] = token_resp["access_token"]
+            auth["expiry_timestamp"] = now + token_resp.get("expires_in", 3600)
+            save_auth(auth)
+            return auth["access_token"]
+    except Exception as e:
+        print(f"Error refreshing token: {e}", file=sys.stderr)
+        return None
+
+def start_oauth_flow():
+    client_id, client_secret = load_client_credentials()
+    if not client_id or not client_secret:
+        print("MISSING_CREDENTIALS")
+        return False
+
+    auth_code_holder = {"code": None, "error": None}
+    server_holder = {"server": None}
+
+    class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+
+            if "code" in query:
+                auth_code_holder["code"] = query["code"][0]
+                self.send_response(200)
+                self.send_header("Content-type", "text/html; charset=utf-8")
+                self.end_headers()
+                html = """
+                <!DOCTYPE html>
+                <html>
+                <head><title>Google Calendar Connected</title></head>
+                <body style="font-family:system-ui,sans-serif;text-align:center;padding:60px;background:#181825;color:#cdd6f4;">
+                    <div style="background:#313244;padding:40px;border-radius:16px;display:inline-block;box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+                        <h1 style="color:#a6e3a1;margin-bottom:10px;">&#10004; Google Calendar Connected!</h1>
+                        <p style="font-size:18px;color:#bac2de;">All Google Calendars in your account are now linked.</p>
+                        <p style="font-size:14px;color:#6c7086;margin-top:20px;">You can close this tab and return to Omarchy Clock.</p>
+                    </div>
+                </body>
+                </html>
+                """
+                self.wfile.write(html.encode("utf-8"))
+            elif "error" in query:
+                auth_code_holder["error"] = query["error"][0]
+                self.send_response(400)
+                self.send_header("Content-type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h1>Authentication Failed</h1><p>Please try again.</p>")
+
+            threading.Thread(target=lambda: server_holder["server"].shutdown()).start()
+
+    port = 8765
+    while port < 8790:
+        try:
+            httpd = socketserver.TCPServer(("127.0.0.1", port), OAuthCallbackHandler)
+            server_holder["server"] = httpd
+            break
+        except OSError:
+            port += 1
+
+    redirect_uri = f"http://127.0.0.1:{port}"
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(SCOPES),
+        "access_type": "offline",
+        "prompt": "consent"
+    }
+
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    print(f"AUTH_URL:{auth_url}", flush=True)
+
+    try:
+        subprocess.Popen(["xdg-open", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"Failed to open browser with xdg-open: {e}", file=sys.stderr)
+
+    print("Waiting for Google authorization...", flush=True)
+    httpd.serve_forever()
+    httpd.server_close()
+
+    if not auth_code_holder["code"]:
+        print(f"Authorization failed: {auth_code_holder.get('error', 'No code received')}", flush=True)
+        return False
+
+    try:
+        data = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": auth_code_holder["code"],
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code"
+        }).encode("utf-8")
+
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            token_resp = json.loads(resp.read().decode("utf-8"))
+            now = datetime.now(timezone.utc).timestamp()
+            auth_data = {
+                "access_token": token_resp["access_token"],
+                "refresh_token": token_resp.get("refresh_token"),
+                "expiry_timestamp": now + token_resp.get("expires_in", 3600),
+                "created_at": datetime.now().isoformat()
+            }
+            save_auth(auth_data)
+            print("AUTH_SUCCESS", flush=True)
+            list_cloud_events()
+            return True
+    except Exception as e:
+        print(f"Token exchange failed: {e}", file=sys.stderr)
+        return False
+
+def list_cloud_calendars():
+    token = get_valid_access_token()
+    if not token:
+        return []
+
+    req = urllib.request.Request("https://www.googleapis.com/calendar/v3/users/me/calendarList", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("items", [])
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(CLOUD_CALS_FILE, "w", encoding="utf-8") as f:
+                json.dump(items, f, indent=2)
+            return items
+    except Exception as e:
+        print(f"Error fetching calendar list: {e}", file=sys.stderr)
+        return []
+
+def list_cloud_events(days_back=30, days_forward=90):
+    token = get_valid_access_token()
+    if not token:
+        return []
+
+    cals = list_cloud_calendars()
+    if not cals:
+        # Fallback to primary if list fails
+        cals = [{"id": "primary", "summary": "Google Calendar", "backgroundColor": "#4285F4"}]
+
+    now = datetime.now(timezone.utc)
+    time_min = (now - timedelta(days=days_back)).isoformat()
+    time_max = (now + timedelta(days=days_forward)).isoformat()
+
+    all_events = []
+    for cal in cals:
+        if cal.get("selected") is False:
+            continue
+        cal_id = cal.get("id")
+        cal_name = cal.get("summary", "Calendar")
+        cal_color = cal.get("backgroundColor", "#4285F4")
+        encoded_id = urllib.parse.quote(cal_id, safe="")
+
+        params = urllib.parse.urlencode({
+            "timeMin": time_min,
+            "timeMax": time_max,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": 250
+        })
+
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events?{params}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                items = data.get("items", [])
+                for ev in items:
+                    ev["calendarName"] = cal_name
+                    ev["calendarColor"] = cal_color
+                    ev["calendarId"] = cal_id
+                    all_events.append(ev)
+        except Exception as e:
+            # Ignore 404 or inaccessible secondary calendars
+            pass
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(API_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(all_events, f, indent=2)
+    return all_events
+
+def get_system_timezone():
+    if os.path.exists("/etc/timezone"):
+        try:
+            with open("/etc/timezone", "r") as f:
+                tz = f.read().strip()
+                if tz:
+                    return tz
+        except Exception:
+            pass
+    if os.path.islink("/etc/localtime"):
+        try:
+            target = os.readlink("/etc/localtime")
+            parts = target.split("zoneinfo/")
+            if len(parts) > 1:
+                return parts[1]
+        except Exception:
+            pass
+    return "America/Sao_Paulo"
+
+def create_cloud_event(summary, date_key, all_day=False, start_time="09:00", end_time="10:00", location="", description="", calendar_id="primary", rrule="", add_meet=False):
+    token = get_valid_access_token()
+    if not token:
+        print("ERROR: Not authenticated.", file=sys.stderr)
+        return None
+
+    now = datetime.now()
+    local_now = now.astimezone()
+    tz_offset = local_now.strftime("%z")
+    tz_formatted = f"{tz_offset[:3]}:{tz_offset[3:]}" if len(tz_offset) >= 5 else "-03:00"
+    sys_tz = get_system_timezone()
+
+    event_body = {
+        "summary": summary,
+        "description": description or "",
+        "location": location or ""
+    }
+    if rrule:
+        clean_rrule = rrule.strip()
+        if not clean_rrule.startswith("RRULE:"):
+            clean_rrule = f"RRULE:{clean_rrule}"
+        event_body["recurrence"] = [clean_rrule]
+
+    if add_meet:
+        event_body["conferenceData"] = {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {
+                    "type": "hangoutsMeet"
+                }
+            }
+        }
+
+    if all_day:
+        dt_start = datetime.strptime(date_key, "%Y-%m-%d")
+        dt_end = dt_start + timedelta(days=1)
+        event_body["start"] = {"date": date_key, "timeZone": sys_tz}
+        event_body["end"] = {"date": dt_end.strftime("%Y-%m-%d"), "timeZone": sys_tz}
+    else:
+        event_body["start"] = {"dateTime": f"{date_key}T{start_time}:00{tz_formatted}", "timeZone": sys_tz}
+        event_body["end"] = {"dateTime": f"{date_key}T{end_time}:00{tz_formatted}", "timeZone": sys_tz}
+
+    data = json.dumps(event_body).encode("utf-8")
+    encoded_id = urllib.parse.quote(calendar_id or "primary", safe="")
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events"
+    if add_meet:
+        url += "?conferenceDataVersion=1"
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            created = json.loads(resp.read().decode("utf-8"))
+            print(f"EVENT_CREATED:{created.get('id')}", flush=True)
+            list_cloud_events()
+            return created
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            pass
+        print(f"Error creating Google Calendar event: {e} - {body}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"Error creating Google Calendar event: {e}", file=sys.stderr)
+        return None
+
+def delete_cloud_event(event_id, calendar_id="primary"):
+    token = get_valid_access_token()
+    if not token:
+        print("ERROR: Not authenticated.", file=sys.stderr)
+        return False
+
+    encoded_id = urllib.parse.quote(calendar_id or "primary", safe="")
+    req = urllib.request.Request(
+        f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events/{event_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        method="DELETE"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            print("EVENT_DELETED", flush=True)
+            list_cloud_events()
+            return True
+    except Exception as e:
+        print(f"Error deleting event: {e}", file=sys.stderr)
+        return False
+
+def stop_cloud_recurrence(master_event_id, date_key, calendar_id="primary"):
+    token = get_valid_access_token()
+    if not token:
+        print("ERROR: Not authenticated.", file=sys.stderr)
+        return False
+
+    encoded_id = urllib.parse.quote(calendar_id or "primary", safe="")
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events/{master_event_id}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            master = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"Error fetching master event: {e}", file=sys.stderr)
+        return False
+
+    try:
+        dt = datetime.strptime(date_key, "%Y-%m-%d")
+        dt_until = dt - timedelta(days=1)
+        until_str = dt_until.strftime("%Y%m%dT235959Z")
+
+        new_recurrence = []
+        for r in master.get("recurrence", []):
+            parts = [p for p in r.split(";") if not p.startswith("UNTIL=") and not p.startswith("COUNT=")]
+            parts.append(f"UNTIL={until_str}")
+            new_recurrence.append(";".join(parts))
+
+        master["recurrence"] = new_recurrence
+        data = json.dumps(master).encode("utf-8")
+        put_req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            method="PUT"
+        )
+        with urllib.request.urlopen(put_req, timeout=15) as resp:
+            print("RECURRENCE_STOPPED", flush=True)
+            list_cloud_events()
+            return True
+    except Exception as e:
+        print(f"Error updating master recurrence: {e}", file=sys.stderr)
+        return False
+
+def get_auth_status():
+    auth = load_auth()
+    client_id, client_secret = load_client_credentials()
+    has_client = bool(client_id and client_secret)
+    is_authenticated = bool(auth and auth.get("refresh_token"))
+    return {
+        "has_client": has_client,
+        "is_authenticated": is_authenticated,
+        "auth_date": auth.get("created_at") if auth else None
+    }
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("Omarchy Clock Google Calendar Two-Way Cloud Sync")
+        print("Usage: gcal-sync <command> [args]")
+        print("Commands:")
+        print("  status                         Check Google Cloud OAuth status")
+        print("  auth                           Authenticate with Google Calendar in browser")
+        print("  logout                         Disconnect Google Calendar account")
+        print("  list-calendars                 List all Google Calendars in account")
+        print("  list-cloud                     List events across all Google Calendars")
+        print("  create <title> <date> [all_day] [start] [end] [loc] [desc] [cal_id]")
+        print("  delete <event_id> [cal_id]     Delete an event from Google Calendar API")
+        return
+
+    cmd = sys.argv[1].lower()
+
+    if cmd == "status":
+        status = get_auth_status()
+        print(json.dumps(status))
+
+    elif cmd == "list-calendars":
+        cals = list_cloud_calendars()
+        print(json.dumps(cals, indent=2))
+
+    elif cmd == "auth":
+        success = start_oauth_flow()
+        sys.exit(0 if success else 1)
+
+    elif cmd == "logout":
+        if os.path.exists(AUTH_FILE):
+            os.remove(AUTH_FILE)
+        if os.path.exists(API_CACHE_FILE):
+            os.remove(API_CACHE_FILE)
+        if os.path.exists(CLOUD_CALS_FILE):
+            os.remove(CLOUD_CALS_FILE)
+        print("LOGGED_OUT")
+
+    elif cmd == "list-cloud":
+        events = list_cloud_events()
+        print(json.dumps(events, indent=2))
+
+    elif cmd == "create":
+        if len(sys.argv) < 4:
+            print("Usage: gcal-sync create <title> <date> [all_day:0/1] [start] [end] [location] [description] [cal_id] [rrule] [add_meet:0/1]")
+            sys.exit(1)
+        summary = sys.argv[2]
+        date_key = sys.argv[3]
+        all_day = sys.argv[4] in ("1", "true", "True") if len(sys.argv) > 4 else False
+        start = sys.argv[5] if len(sys.argv) > 5 else "09:00"
+        end = sys.argv[6] if len(sys.argv) > 6 else "10:00"
+        location = sys.argv[7] if len(sys.argv) > 7 else ""
+        description = sys.argv[8] if len(sys.argv) > 8 else ""
+        cal_id = sys.argv[9] if len(sys.argv) > 9 else "primary"
+        rrule = sys.argv[10] if len(sys.argv) > 10 else ""
+        add_meet = sys.argv[11] in ("1", "true", "True") if len(sys.argv) > 11 else False
+
+        res = create_cloud_event(summary, date_key, all_day, start, end, location, description, cal_id, rrule, add_meet)
+        if res:
+            print(json.dumps(res))
+        else:
+            sys.exit(1)
+
+    elif cmd == "delete":
+        if len(sys.argv) < 3:
+            print("Usage: gcal-sync delete <event_id> [cal_id]")
+            sys.exit(1)
+        cal_id = sys.argv[3] if len(sys.argv) > 3 else "primary"
+        res = delete_cloud_event(sys.argv[2], cal_id)
+        sys.exit(0 if res else 1)
+
+    elif cmd == "stop-recurrence":
+        if len(sys.argv) < 4:
+            print("Usage: gcal-sync stop-recurrence <master_event_id> <date_key> [cal_id]")
+            sys.exit(1)
+        cal_id = sys.argv[4] if len(sys.argv) > 4 else "primary"
+        res = stop_cloud_recurrence(sys.argv[2], sys.argv[3], cal_id)
+        sys.exit(0 if res else 1)
+
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

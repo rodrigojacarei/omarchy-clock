@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# omarchy-clock: CLI control tool for the Omarchy Clock & Calendar plugin
+# Sends IPC commands to the running Omarchy Shell instance.
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: omarchy-clock [command] [args...]
+
+Commands:
+  toggle, open, show        Toggle or open the Clock & Calendar panel
+  close, hide               Close the Calendar panel
+  sync                      Trigger immediate synchronization with Google Calendar
+  status                    Check Google Cloud OAuth status
+  auth                      Authenticate with Google Calendar in browser
+  logout                    Disconnect Google Calendar account
+  today                     Jump to today's date in calendar
+  next-month, prev-month    Navigate months
+
+Examples:
+  omarchy-clock toggle
+  omarchy-clock sync
+  omarchy-clock auth
+EOF
+  exit 0
+}
+
+CMD="${1:-toggle}"
+
+case "$CMD" in
+  toggle)
+    omarchy-shell omarchy-clock toggle 2>/dev/null || omarchy-shell rodrigo.clock toggle 2>/dev/null || true
+    ;;
+  open|show)
+    omarchy-shell omarchy-clock open 2>/dev/null || omarchy-shell rodrigo.clock open 2>/dev/null || true
+    ;;
+  close|hide)
+    omarchy-shell omarchy-clock close 2>/dev/null || omarchy-shell rodrigo.clock close 2>/dev/null || true
+    ;;
+  sync)
+    omarchy-shell omarchy-clock sync 2>/dev/null || omarchy-shell rodrigo.clock sync 2>/dev/null || true
+    echo "Triggered calendar synchronization"
+    ;;
+  status|auth|logout|create|list-cloud)
+    DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    python3 "$DIR/gcal-sync" "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $CMD" >&2
+    usage
+    ;;
+esac

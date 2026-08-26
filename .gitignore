@@ -1,0 +1,13 @@
+# Cache & local state
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+.DS_Store
+
+# User credentials & event data
+client_secret.json
+auth.json
+local_events.json
+ics_cache.json
+cloud_events.json
