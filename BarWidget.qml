@@ -194,11 +194,31 @@ BarWidget {
     function refresh(): void { root.broadcast("refresh") }
     function cycleFormat(): void { root.cycleFormat() }
     function toggleWeekStart(): void { root.toggleWeekStart() }
-    function open(): void { root.open() }
+    function open(): void {
+      if (panelLoader.item) {
+        panelLoader.item.showSettings = false
+        panelLoader.item.showAddEvent = false
+      }
+      root.open()
+    }
     function close(): void { root.close() }
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function openSettings(): void {
+      root.open()
+      if (panelLoader.item) {
+        panelLoader.item.showAddEvent = false
+        panelLoader.item.showSettings = true
+      }
+    }
+    function openAddEvent(): void {
+      root.open()
+      if (panelLoader.item) {
+        panelLoader.item.showSettings = false
+        panelLoader.item.showAddEvent = true
+      }
+    }
   }
 
   IpcHandler {
@@ -207,11 +227,31 @@ BarWidget {
     function refresh(): void { root.broadcast("refresh") }
     function cycleFormat(): void { root.cycleFormat() }
     function toggleWeekStart(): void { root.toggleWeekStart() }
-    function open(): void { root.open() }
+    function open(): void {
+      if (panelLoader.item) {
+        panelLoader.item.showSettings = false
+        panelLoader.item.showAddEvent = false
+      }
+      root.open()
+    }
     function close(): void { root.close() }
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function openSettings(): void {
+      root.open()
+      if (panelLoader.item) {
+        panelLoader.item.showAddEvent = false
+        panelLoader.item.showSettings = true
+      }
+    }
+    function openAddEvent(): void {
+      root.open()
+      if (panelLoader.item) {
+        panelLoader.item.showSettings = false
+        panelLoader.item.showAddEvent = true
+      }
+    }
   }
 
   IpcHandler {
@@ -220,11 +260,31 @@ BarWidget {
     function refresh(): void { root.broadcast("refresh") }
     function cycleFormat(): void { root.cycleFormat() }
     function toggleWeekStart(): void { root.toggleWeekStart() }
-    function open(): void { root.open() }
+    function open(): void {
+      if (panelLoader.item) {
+        panelLoader.item.showSettings = false
+        panelLoader.item.showAddEvent = false
+      }
+      root.open()
+    }
     function close(): void { root.close() }
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function openSettings(): void {
+      root.open()
+      if (panelLoader.item) {
+        panelLoader.item.showAddEvent = false
+        panelLoader.item.showSettings = true
+      }
+    }
+    function openAddEvent(): void {
+      root.open()
+      if (panelLoader.item) {
+        panelLoader.item.showSettings = false
+        panelLoader.item.showAddEvent = true
+      }
+    }
   }
 
   WidgetButton {
