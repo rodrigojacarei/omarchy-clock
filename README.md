@@ -5,7 +5,7 @@ A feature-rich, modern Clock, Month Calendar, Agenda, and Google Calendar Two-Wa
 > **Note**: This plugin is **derived from and built upon Omarchy's official built-in clock plugin (`omarchy.clock`)**, heavily enhanced with Google Calendar OAuth 2.0 two-way cloud synchronization, Google Meet 1-click video call integration, recurrence engine, and persistent desktop notifications.
 
 <div align="center">
-  <img src="preview.png" alt="Omarchy Clock & Calendar" width="700" />
+  <img src="preview.png?v=2" alt="Omarchy Clock & Calendar" width="700" />
 </div>
 
 <p align="center">
@@ -22,7 +22,7 @@ A feature-rich, modern Clock, Month Calendar, Agenda, and Google Calendar Two-Wa
 - **Meeting Indicator**: Shows a video camera icon (`📹`) when the upcoming event has a Google Meet or conference link.
 
 <div align="center">
-  <img src="assets/preview_bar.png" alt="Top Bar Countdown" width="600" />
+  <img src="assets/preview_bar.png?v=2" alt="Top Bar Countdown" width="600" />
   <p><em>Top status bar displaying live date/time alongside the upcoming event countdown</em></p>
 </div>
 
@@ -35,7 +35,7 @@ A feature-rich, modern Clock, Month Calendar, Agenda, and Google Calendar Two-Wa
 - **1-Click Google Meet Join**: Events with meeting links feature a green **`Join`** button to open the call directly in your browser.
 
 <div align="center">
-  <img src="assets/preview_panel.png" alt="Calendar and Agenda View" width="560" />
+  <img src="assets/preview_panel.png?v=2" alt="Calendar and Agenda View" width="560" />
 </div>
 
 ---
@@ -46,7 +46,7 @@ A feature-rich, modern Clock, Month Calendar, Agenda, and Google Calendar Two-Wa
 - **Generate Meeting Link**: Toggle to automatically provision a Google Meet video conference link for the new event.
 
 <div align="center">
-  <img src="assets/preview_addevent.png" alt="Add Event Drawer" width="560" />
+  <img src="assets/preview_addevent.png?v=2" alt="Add Event Drawer" width="560" />
   <p><em>Add event drawer with custom recurrence rules and Google Meet generation</em></p>
 </div>
 
@@ -74,7 +74,7 @@ When deleting a repeating event, an interactive dialog prompts you to choose the
 - **Configurable Auto-Sync Cadence**: Choose background auto-sync frequency (**1 min**, **2 min** *(default)*, **5 min**, or **15 min**).
 
 <div align="center">
-  <img src="assets/preview_settings.png" alt="Settings & Google Cloud Sync" width="560" />
+  <img src="assets/preview_settings.png?v=2" alt="Settings & Google Cloud Sync" width="560" />
   <p><em>Settings view with Google Cloud OAuth 2.0 status, sync frequency, and notification preferences</em></p>
 </div>
 
