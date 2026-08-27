@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "omarchy-clock"
-  ipcTarget: "omarchy-clock"
+  moduleName: "rodrigo.clock"
+  ipcTarget: "rodrigo.clock"
   manageIpc: false
 
   property var anchorItem: null
@@ -822,11 +822,18 @@ Panel {
         var raw = String(text || "").trim()
         if (raw) {
           try {
-            var items = JSON.parse(raw)
-            if (Array.isArray(items)) {
-              root.cloudApiEvents = items
-              root.recomputeExpandedEvents()
+            var parsed = JSON.parse(raw)
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              if (Array.isArray(parsed.calendars)) {
+                root.cloudCalendars = parsed.calendars
+              }
+              if (Array.isArray(parsed.events)) {
+                root.cloudApiEvents = parsed.events
+              }
+            } else if (Array.isArray(parsed)) {
+              root.cloudApiEvents = parsed
             }
+            root.recomputeExpandedEvents()
           } catch (e) {}
         }
       }
