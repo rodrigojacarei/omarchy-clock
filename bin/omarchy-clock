@@ -42,7 +42,7 @@ case "$CMD" in
     omarchy-shell omarchy-clock sync 2>/dev/null || true
     echo "Triggered calendar synchronization"
     ;;
-  status|auth|logout|create|list-cloud)
+  status|auth|logout|create|list-cloud|set-credentials|save-calendars|save-local-events|save-disabled-calendars|save-ics-cache|load-all|list-calendars|delete|stop-recurrence)
     DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     python3 "$DIR/gcal-sync" "$@"
     ;;

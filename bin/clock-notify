@@ -9,9 +9,17 @@ URGENCY="${5:-critical}"
 # Convert literal \n sequences into real newlines
 BODY=$(printf '%b' "$BODY")
 
+# Validate MEET_URL: strictly parse HTTPS URL matching allowed meeting hosts
+VALID_MEET=0
+if [ -n "$MEET_URL" ]; then
+  if [[ "$MEET_URL" =~ ^https://([a-zA-Z0-9.-]+\.)?(meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com|meet\.jit\.si)(:[0-9]+)?(/[^\s\"\'\`\<\>\\]*)?$ ]]; then
+    VALID_MEET=1
+  fi
+fi
+
 if [ -x "/usr/share/omarchy/bin/omarchy-notification-send" ]; then
-  if [ -n "$MEET_URL" ]; then
-    /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰕧}" -u "$URGENCY" "$TITLE" "$BODY" --exec xdg-open "$MEET_URL" 2>/dev/null
+  if [ "$VALID_MEET" -eq 1 ]; then
+    /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰕧}" -u "$URGENCY" "$TITLE" "$BODY" --exec xdg-open -- "$MEET_URL" 2>/dev/null
   else
     /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰃭}" -u "$URGENCY" "$TITLE" "$BODY" 2>/dev/null
   fi

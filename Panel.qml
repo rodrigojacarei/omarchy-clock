@@ -260,8 +260,8 @@ Panel {
     root.isWaitingAuth = true
     startAuthProc.running = false
     startAuthProc.running = true
-    if (root.currentAuthUrl) {
-      Quickshell.execDetached(["xdg-open", root.currentAuthUrl])
+    if (root.currentAuthUrl && Model.isValidGoogleAuthUrl(root.currentAuthUrl)) {
+      Quickshell.execDetached(["xdg-open", "--", root.currentAuthUrl])
     }
   }
 
@@ -271,24 +271,29 @@ Panel {
 
   function setCredentials(cId, cSecret) {
     setCredsProc.command = [
-      "python3", "-c",
-      "import os, json; d=os.path.expanduser('~/.config/omarchy-clock'); os.makedirs(d, exist_ok=True); open(os.path.join(d, 'client.json'), 'w').write(json.dumps({'client_id': '" + cId + "', 'client_secret': '" + cSecret + "'}))"
+      "python3",
+      root.gcalSyncBin,
+      "set-credentials",
+      String(cId || "").trim(),
+      String(cSecret || "").trim()
     ]
     setCredsProc.running = true
   }
 
   function saveCalendars() {
     Quickshell.execDetached([
-      "python3", "-c",
-      "import sys, os; d = os.path.expanduser('~/.config/omarchy-clock'); os.makedirs(d, exist_ok=True); open(os.path.join(d, 'calendars.json'), 'w').write(sys.argv[1])",
+      "python3",
+      root.gcalSyncBin,
+      "save-calendars",
       JSON.stringify(root.calendars)
     ])
   }
 
   function saveLocalEvents() {
     Quickshell.execDetached([
-      "python3", "-c",
-      "import sys, os; d = os.path.expanduser('~/.config/omarchy-clock'); os.makedirs(d, exist_ok=True); open(os.path.join(d, 'local_events.json'), 'w').write(sys.argv[1])",
+      "python3",
+      root.gcalSyncBin,
+      "save-local-events",
       JSON.stringify(root.localEvents)
     ])
   }
@@ -320,8 +325,9 @@ Panel {
 
   function saveDisabledCalendars() {
     Quickshell.execDetached([
-      "python3", "-c",
-      "import sys, os; d = os.path.expanduser('~/.config/omarchy-clock'); os.makedirs(d, exist_ok=True); open(os.path.join(d, 'disabled_calendars.json'), 'w').write(sys.argv[1])",
+      "python3",
+      root.gcalSyncBin,
+      "save-disabled-calendars",
       JSON.stringify(root.disabledCalendarIds)
     ])
   }
@@ -493,11 +499,8 @@ Panel {
   }
 
   function addCalendar(name, url, color) {
-    var cleanUrl = String(url || "").trim()
+    var cleanUrl = Model.normalizeIcsUrl(url)
     if (!cleanUrl) return
-    if (cleanUrl.indexOf("webcal://") === 0) {
-      cleanUrl = "https://" + cleanUrl.substring(9)
-    }
 
     var cleanName = String(name || "").trim() || "Google Calendar"
     var cleanColor = String(color || "").trim() || Model.PRESET_COLORS[root.calendars.length % Model.PRESET_COLORS.length]
@@ -563,8 +566,24 @@ Panel {
     }
 
     var currentCal = root.syncQueue[root.syncIndex]
+    var safeUrl = Model.normalizeIcsUrl(currentCal.url)
+    if (!safeUrl) {
+      root.syncIndex++
+      syncNextCalendar()
+      return
+    }
+
     fetchIcsProc.calendarMeta = currentCal
-    fetchIcsProc.command = ["curl", "-fsSL", "--max-time", "15", currentCal.url]
+    fetchIcsProc.command = [
+      "curl",
+      "-fsSL",
+      "--proto", "=https",
+      "--proto-redir", "=https",
+      "--max-time", "15",
+      "--max-filesize", "5242880",
+      "--",
+      safeUrl
+    ]
     fetchIcsProc.running = true
   }
 
@@ -698,18 +717,21 @@ Panel {
 
   function saveEventsCache() {
     Quickshell.execDetached([
-      "python3", "-c",
-      "import sys, os; d = os.path.expanduser('~/.cache/omarchy/clock'); os.makedirs(d, exist_ok=True); open(os.path.join(d, 'ics_cache.json'), 'w').write(sys.argv[1])",
+      "python3",
+      root.gcalSyncBin,
+      "save-ics-cache",
       JSON.stringify(root.rawCalendarIcs)
     ])
   }
 
   function openGoogleCalendar() {
-    Quickshell.execDetached(["xdg-open", "https://calendar.google.com"])
+    Quickshell.execDetached(["xdg-open", "--", "https://calendar.google.com"])
   }
 
   function openMeetLink(meetUrl) {
-    if (meetUrl) Quickshell.execDetached(["xdg-open", meetUrl])
+    if (meetUrl && Model.isValidMeetingUrl(meetUrl)) {
+      Quickshell.execDetached(["xdg-open", "--", String(meetUrl).trim()])
+    }
   }
 
   function sendTestNotification() {
@@ -776,8 +798,10 @@ Panel {
           for (var i = 0; i < lines.length; i++) {
             if (lines[i].indexOf("AUTH_URL:") === 0) {
               var u = lines[i].substring(9).trim()
-              root.currentAuthUrl = u
-              Quickshell.execDetached(["xdg-open", u])
+              if (Model.isValidGoogleAuthUrl(u)) {
+                root.currentAuthUrl = u
+                Quickshell.execDetached(["xdg-open", "--", u])
+              }
             }
           }
         }
@@ -884,7 +908,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var raw = String(text || "").trim()
-        if (raw && fetchIcsProc.calendarMeta && raw.indexOf("BEGIN:VCALENDAR") !== -1) {
+        if (raw.length > 0 && raw.length <= 5242880 && fetchIcsProc.calendarMeta && raw.indexOf("BEGIN:VCALENDAR") !== -1) {
           var calId = fetchIcsProc.calendarMeta.id
           var map = root.rawCalendarIcs || ({})
           map[calId] = raw
@@ -897,60 +921,26 @@ Panel {
   // Load Initial Config Process
   Process {
     id: loadConfigProc
-    command: [
-      "bash", "-c",
-      "cat ~/.config/omarchy-clock/calendars.json 2>/dev/null || true; echo '---SPLIT---'; " +
-      "cat ~/.config/omarchy-clock/local_events.json 2>/dev/null || true; echo '---SPLIT---'; " +
-      "cat ~/.config/omarchy-clock/disabled_calendars.json 2>/dev/null || true; echo '---SPLIT---'; " +
-      "cat ~/.cache/omarchy/clock/cloud_calendars.json 2>/dev/null || true; echo '---SPLIT---'; " +
-      "cat ~/.cache/omarchy/clock/api_events.json 2>/dev/null || true; echo '---SPLIT---'; " +
-      "cat ~/.cache/omarchy/clock/ics_cache.json 2>/dev/null || true"
-    ]
+    command: ["python3", root.gcalSyncBin, "load-all"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text || "")
-        var parts = raw.split("---SPLIT---")
-        if (parts.length >= 1 && parts[0].trim()) {
+        var raw = String(text || "").trim()
+        if (raw) {
           try {
-            var parsedCals = JSON.parse(parts[0].trim())
-            if (Array.isArray(parsedCals)) root.calendars = parsedCals
-          } catch (e) {}
-        }
-        if (parts.length >= 2 && parts[1].trim()) {
-          try {
-            var parsedLocal = JSON.parse(parts[1].trim())
-            if (Array.isArray(parsedLocal)) root.localEvents = parsedLocal
-          } catch (e) {}
-        }
-        if (parts.length >= 3 && parts[2].trim()) {
-          try {
-            var parsedDis = JSON.parse(parts[2].trim())
-            if (Array.isArray(parsedDis)) root.disabledCalendarIds = parsedDis
-          } catch (e) {}
-        }
-        if (parts.length >= 4 && parts[3].trim()) {
-          try {
-            var parsedCloudCals = JSON.parse(parts[3].trim())
-            if (Array.isArray(parsedCloudCals)) root.cloudCalendars = parsedCloudCals
-          } catch (e) {}
-        }
-        if (parts.length >= 5 && parts[4].trim()) {
-          try {
-            var parsedApi = JSON.parse(parts[4].trim())
-            if (Array.isArray(parsedApi)) root.cloudApiEvents = parsedApi
-          } catch (e) {}
-        }
-        if (parts.length >= 6 && parts[5].trim()) {
-          try {
-            var parsedCache = JSON.parse(parts[5].trim())
-            if (parsedCache && typeof parsedCache === "object") {
-              root.rawCalendarIcs = parsedCache
+            var data = JSON.parse(raw)
+            if (Array.isArray(data.calendars)) root.calendars = data.calendars
+            if (Array.isArray(data.localEvents)) root.localEvents = data.localEvents
+            if (Array.isArray(data.disabledCalendars)) root.disabledCalendarIds = data.disabledCalendars
+            if (Array.isArray(data.cloudCalendars)) root.cloudCalendars = data.cloudCalendars
+            if (Array.isArray(data.cloudApiEvents)) root.cloudApiEvents = data.cloudApiEvents
+            if (data.rawCalendarIcs && typeof data.rawCalendarIcs === "object") {
+              root.rawCalendarIcs = data.rawCalendarIcs
             }
+            root.recomputeExpandedEvents()
+            root.syncAllCalendars()
           } catch (e) {}
         }
-        root.recomputeExpandedEvents()
-        root.syncAllCalendars()
       }
     }
   }
@@ -1024,6 +1014,7 @@ Panel {
               spacing: Style.space(14)
 
               Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 text: "󰃭"
                 color: heroMouse.containsMouse
@@ -1038,6 +1029,7 @@ Panel {
                 spacing: 0
 
                 Text {
+                  textFormat: Text.PlainText
                   id: heroDate
                   text: Qt.formatDate(root.today, "MMMM d")
                   color: heroMouse.containsMouse
@@ -1049,6 +1041,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: Qt.formatDate(root.today, "dddd, yyyy") + " · Week " + root.currentWeekNumber
                   color: Qt.darker(root.contentForeground, 1.4)
                   font.family: root.contentFontFamily
@@ -1141,6 +1134,7 @@ Panel {
               height: Math.max(yearLabel.implicitHeight, Style.space(10))
 
               Text {
+                textFormat: Text.PlainText
                 id: yearLabel
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
@@ -1152,6 +1146,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 id: yearPercent
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
@@ -1224,6 +1219,7 @@ Panel {
                       : "transparent"
 
                     Text {
+                      textFormat: Text.PlainText
                       anchors.centerIn: parent
                       text: "W"
                       color: weekStartMouse.containsMouse
@@ -1259,6 +1255,7 @@ Panel {
                     model: root.weekdays
 
                     Text {
+                      textFormat: Text.PlainText
                       required property var modelData
                       width: root.cellWidth
                       height: Style.space(16)
@@ -1283,6 +1280,7 @@ Panel {
                     spacing: root.cellSpacing
 
                     Text {
+                      textFormat: Text.PlainText
                       width: root.weekColumnWidth
                       height: root.cellHeight
                       horizontalAlignment: Text.AlignHCenter
@@ -1332,6 +1330,7 @@ Panel {
                           spacing: 2
 
                           Text {
+                            textFormat: Text.PlainText
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: dayCell.modelData.day
                             color: dayCell.isSelected
@@ -1392,6 +1391,7 @@ Panel {
                 height: monthLabel.implicitHeight + Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   id: monthLabel
                   anchors.horizontalCenter: parent.horizontalCenter
                   anchors.verticalCenter: parent.verticalCenter
@@ -1455,6 +1455,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: root.selectedDateKey === root.todayKey ? "󰃭" : "󰸗"
                     color: root.selectedDateKey === root.todayKey ? Color.accent : Qt.darker(root.contentForeground, 1.4)
                     font.family: root.contentFontFamily
@@ -1463,6 +1464,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: {
                       if (root.selectedDateKey === root.todayKey) {
                         return "Today · " + Qt.formatDate(root.selectedDate, "dddd, MMM d")
@@ -1488,6 +1490,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
 
                     Text {
+                      textFormat: Text.PlainText
                       id: countText
                       anchors.centerIn: parent
                       text: String(root.selectedEvents.length)
@@ -1508,6 +1511,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
 
                     Text {
+                      textFormat: Text.PlainText
                       id: cloudTag
                       anchors.centerIn: parent
                       text: "󰄲 Sync"
@@ -1591,6 +1595,7 @@ Panel {
                     height: Style.space(24)
 
                     Text {
+                      textFormat: Text.PlainText
                       anchors.left: parent.left
                       anchors.verticalCenter: parent.verticalCenter
                       text: (root.isCloudConnected ? "NEW GOOGLE CLOUD EVENT · " : "NEW LOCAL EVENT · ") + Qt.formatDate(root.selectedDate, "MMM d, yyyy").toUpperCase()
@@ -1637,6 +1642,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         anchors.verticalCenter: parent.verticalCenter
                         text: "All Day"
                         color: root.contentForeground
@@ -1660,6 +1666,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         anchors.verticalCenter: parent.verticalCenter
                         text: "to"
                         color: Qt.darker(root.contentForeground, 1.8)
@@ -1704,6 +1711,7 @@ Panel {
                       spacing: Style.space(6)
 
                       Text {
+                        textFormat: Text.PlainText
                         text: "󰕧"
                         color: newEventCol.addMeetingLink ? "#34A853" : Qt.darker(root.contentForeground, 1.6)
                         font.family: root.contentFontFamily
@@ -1712,6 +1720,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         text: root.isCloudConnected ? "Add Google Meet video conferencing" : "Generate meeting link"
                         color: newEventCol.addMeetingLink ? root.contentForeground : Qt.darker(root.contentForeground, 1.4)
                         font.family: root.contentFontFamily
@@ -1728,6 +1737,7 @@ Panel {
                         anchors.verticalCenter: parent.verticalCenter
 
                         Text {
+                          textFormat: Text.PlainText
                           id: meetTag
                           anchors.centerIn: parent
                           text: "Google Meet"
@@ -1747,6 +1757,7 @@ Panel {
                     spacing: Style.space(4)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "SAVE TO CALENDAR:"
                       color: Qt.darker(root.contentForeground, 1.6)
                       font.family: root.contentFontFamily
@@ -1792,6 +1803,7 @@ Panel {
                             }
 
                             Text {
+                              textFormat: Text.PlainText
                               anchors.verticalCenter: parent.verticalCenter
                               text: String(calChip.modelData.summary || "Calendar")
                               color: calChip.isSelected ? Color.accent : root.contentForeground
@@ -1833,6 +1845,7 @@ Panel {
                         spacing: Style.space(6)
 
                         Text {
+                          textFormat: Text.PlainText
                           text: "󰑐"
                           color: newEventCol.isRecurring ? Color.accent : Qt.darker(root.contentForeground, 1.6)
                           font.family: root.contentFontFamily
@@ -1841,6 +1854,7 @@ Panel {
                         }
 
                         Text {
+                          textFormat: Text.PlainText
                           text: "REPEAT EVENT"
                           color: newEventCol.isRecurring ? root.contentForeground : Qt.darker(root.contentForeground, 1.6)
                           font.family: root.contentFontFamily
@@ -1884,6 +1898,7 @@ Panel {
                           spacing: Style.space(10)
 
                           Text {
+                            textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
                             text: "Repeat every:"
                             color: root.contentForeground
@@ -1904,6 +1919,7 @@ Panel {
                               color: decMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
 
                               Text {
+                                textFormat: Text.PlainText
                                 anchors.centerIn: parent
                                 text: "−"
                                 color: root.contentForeground
@@ -1930,6 +1946,7 @@ Panel {
                               border.color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
 
                               Text {
+                                textFormat: Text.PlainText
                                 anchors.centerIn: parent
                                 text: String(newEventCol.customInterval)
                                 color: root.contentForeground
@@ -1946,6 +1963,7 @@ Panel {
                               color: incMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
 
                               Text {
+                                textFormat: Text.PlainText
                                 anchors.centerIn: parent
                                 text: "+"
                                 color: root.contentForeground
@@ -1993,6 +2011,7 @@ Panel {
                                 border.color: isSelected ? Color.accent : "transparent"
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   id: uText
                                   anchors.centerIn: parent
                                   text: String(unitBtn.modelData.label) + (newEventCol.customInterval > 1 ? "s" : "")
@@ -2021,6 +2040,7 @@ Panel {
                           spacing: Style.space(4)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "Repeat on days:"
                             color: Qt.darker(root.contentForeground, 1.6)
                             font.family: root.contentFontFamily
@@ -2055,6 +2075,7 @@ Panel {
                                   : (dayMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08))
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   anchors.centerIn: parent
                                   text: String(dayBubble.modelData.label)
                                   color: dayBubble.isSelected ? "#ffffff" : root.contentForeground
@@ -2118,6 +2139,7 @@ Panel {
                                 spacing: 4
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   text: "󰃭"
                                   color: mDayModeBtn.isSelected ? Color.accent : root.contentForeground
                                   font.family: root.contentFontFamily
@@ -2126,6 +2148,7 @@ Panel {
                                 }
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   text: "On Day of Month"
                                   color: mDayModeBtn.isSelected ? Color.accent : root.contentForeground
                                   font.family: root.contentFontFamily
@@ -2162,6 +2185,7 @@ Panel {
                                 spacing: 4
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   text: "󰃮"
                                   color: mNthModeBtn.isSelected ? Color.accent : root.contentForeground
                                   font.family: root.contentFontFamily
@@ -2170,6 +2194,7 @@ Panel {
                                 }
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   text: "On Nth Weekday"
                                   color: mNthModeBtn.isSelected ? Color.accent : root.contentForeground
                                   font.family: root.contentFontFamily
@@ -2196,6 +2221,7 @@ Panel {
                             spacing: Style.space(10)
 
                             Text {
+                              textFormat: Text.PlainText
                               anchors.verticalCenter: parent.verticalCenter
                               text: "Day of month:"
                               color: Qt.darker(root.contentForeground, 1.4)
@@ -2215,6 +2241,7 @@ Panel {
                                 color: mDecMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   anchors.centerIn: parent
                                   text: "−"
                                   color: root.contentForeground
@@ -2242,6 +2269,7 @@ Panel {
                                 border.color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   anchors.centerIn: parent
                                   text: String(newEventCol.customMonthDay)
                                   color: root.contentForeground
@@ -2258,6 +2286,7 @@ Panel {
                                 color: mIncMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   anchors.centerIn: parent
                                   text: "+"
                                   color: root.contentForeground
@@ -2298,6 +2327,7 @@ Panel {
                                   border.color: isSelected ? Color.accent : "transparent"
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     id: qDayText
                                     anchors.centerIn: parent
                                     text: String(qDayChip.modelData)
@@ -2329,6 +2359,7 @@ Panel {
                               spacing: Style.space(6)
 
                               Text {
+                                textFormat: Text.PlainText
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "The"
                                 color: Qt.darker(root.contentForeground, 1.4)
@@ -2362,6 +2393,7 @@ Panel {
                                   border.color: isSelected ? Color.accent : "transparent"
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     id: nthPosText
                                     anchors.centerIn: parent
                                     text: String(nthPosChip.modelData.label)
@@ -2387,6 +2419,7 @@ Panel {
                               spacing: Style.space(6)
 
                               Text {
+                                textFormat: Text.PlainText
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "on"
                                 color: Qt.darker(root.contentForeground, 1.4)
@@ -2422,6 +2455,7 @@ Panel {
                                   border.color: isSelected ? Color.accent : "transparent"
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     id: nthDayText
                                     anchors.centerIn: parent
                                     text: String(nthDayChip.modelData.label)
@@ -2450,6 +2484,7 @@ Panel {
                           spacing: Style.space(6)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "Ends:"
                             color: Qt.darker(root.contentForeground, 1.4)
                             font.family: root.contentFontFamily
@@ -2476,6 +2511,7 @@ Panel {
                               border.color: isSelected ? Color.accent : "transparent"
 
                               Text {
+                                textFormat: Text.PlainText
                                 id: endNevText
                                 anchors.centerIn: parent
                                 text: "Never"
@@ -2512,6 +2548,7 @@ Panel {
                                 border.color: isSelected ? Color.accent : "transparent"
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   id: endCntText
                                   anchors.centerIn: parent
                                   text: "After"
@@ -2543,6 +2580,7 @@ Panel {
                                   color: cDecMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     anchors.centerIn: parent
                                     text: "−"
                                     color: root.contentForeground
@@ -2569,6 +2607,7 @@ Panel {
                                   border.color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     anchors.centerIn: parent
                                     text: String(newEventCol.customCount)
                                     color: Color.accent
@@ -2585,6 +2624,7 @@ Panel {
                                   color: cIncMouse.containsMouse ? Style.hoverFillFor(root.contentForeground, Color.accent) : Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     anchors.centerIn: parent
                                     text: "+"
                                     color: root.contentForeground
@@ -2602,6 +2642,7 @@ Panel {
                                 }
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   anchors.verticalCenter: parent.verticalCenter
                                   text: "times"
                                   color: Qt.darker(root.contentForeground, 1.4)
@@ -2629,6 +2670,7 @@ Panel {
                                 border.color: isSelected ? Color.accent : "transparent"
 
                                 Text {
+                                  textFormat: Text.PlainText
                                   id: endUntilText
                                   anchors.centerIn: parent
                                   text: "On date"
@@ -2698,6 +2740,7 @@ Panel {
                             width: parent.width - Style.space(16)
 
                             Text {
+                              textFormat: Text.PlainText
                               text: "󰑐"
                               color: Color.accent
                               font.family: root.contentFontFamily
@@ -2706,6 +2749,7 @@ Panel {
                             }
 
                             Text {
+                              textFormat: Text.PlainText
                               text: Model.describeRrule(newEventCol.selectedRrule)
                               color: root.contentForeground
                               font.family: root.contentFontFamily
@@ -2892,6 +2936,7 @@ Panel {
                         spacing: Style.space(8)
 
                         Text {
+                          textFormat: Text.PlainText
                           anchors.verticalCenter: parent.verticalCenter
                           text: String(eventCard.modelData.timeDisplay || "All day")
                           color: eventCard.isPast ? Qt.darker(root.contentForeground, 1.8) : (eventCard.modelData.allDay ? Qt.darker(root.contentForeground, 1.4) : Color.accent)
@@ -2917,12 +2962,14 @@ Panel {
                             spacing: 3
 
                             Text {
+                              textFormat: Text.PlainText
                               text: "󰐊"
                               color: "#34A853"
                               font.family: root.contentFontFamily
                               font.pixelSize: Style.font.caption
                             }
                             Text {
+                              textFormat: Text.PlainText
                               text: "Ongoing"
                               color: "#34A853"
                               font.family: root.contentFontFamily
@@ -2933,6 +2980,7 @@ Panel {
                         }
 
                         Text {
+                          textFormat: Text.PlainText
                           anchors.verticalCenter: parent.verticalCenter
                           text: "• " + String(eventCard.modelData.calendarName || "Event")
                           color: Qt.darker(root.contentForeground, 1.8)
@@ -2944,6 +2992,7 @@ Panel {
 
                       // Event Title (Strikethrough and dimmed if past/completed)
                       Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: String(eventCard.modelData.summary || "Untitled Event")
                         color: eventCard.isPast ? Qt.darker(root.contentForeground, 1.6) : root.contentForeground
@@ -2967,12 +3016,14 @@ Panel {
                           visible: eventCard.modelData.meetUrl !== ""
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰕧"
                             color: "#34A853"
                             font.family: root.contentFontFamily
                             font.pixelSize: Style.font.caption
                           }
                           Text {
+                            textFormat: Text.PlainText
                             text: "Google Meet"
                             color: "#34A853"
                             font.family: root.contentFontFamily
@@ -2986,12 +3037,14 @@ Panel {
                           visible: eventCard.modelData.location !== "" && eventCard.modelData.meetUrl === ""
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰍎"
                             color: Qt.darker(root.contentForeground, 1.6)
                             font.family: root.contentFontFamily
                             font.pixelSize: Style.font.caption
                           }
                           Text {
+                            textFormat: Text.PlainText
                             text: String(eventCard.modelData.location)
                             color: Qt.darker(root.contentForeground, 1.6)
                             font.family: root.contentFontFamily
@@ -3026,6 +3079,7 @@ Panel {
                           spacing: Style.space(4)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰕧"
                             color: "#ffffff"
                             font.family: root.contentFontFamily
@@ -3034,6 +3088,7 @@ Panel {
                           }
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "Join"
                             color: "#ffffff"
                             font.family: root.contentFontFamily
@@ -3089,6 +3144,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: (root.hidePastEvents && root.selectedDateKey === root.todayKey && (root.eventsByDate[root.todayKey] || []).length > 0)
                       ? "All scheduled events for today are completed"
@@ -3103,6 +3159,7 @@ Panel {
                     spacing: Style.space(8)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Click + to create an event directly here"
                       color: Color.accent
                       font.family: root.contentFontFamily
@@ -3144,6 +3201,7 @@ Panel {
                     spacing: Style.space(8)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "󰃮"
                       color: Qt.darker(root.contentForeground, 1.4)
                       font.family: root.contentFontFamily
@@ -3152,6 +3210,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Tomorrow · " + Qt.formatDate(root.tomorrowDate, "dddd, MMM d")
                       color: Qt.darker(root.contentForeground, 1.2)
                       font.family: root.contentFontFamily
@@ -3172,6 +3231,7 @@ Panel {
                       anchors.verticalCenter: parent.verticalCenter
 
                       Text {
+                        textFormat: Text.PlainText
                         id: tomCountText
                         anchors.centerIn: parent
                         text: String(root.tomorrowEvents.length)
@@ -3232,6 +3292,7 @@ Panel {
                         spacing: Style.space(8)
 
                         Text {
+                          textFormat: Text.PlainText
                           anchors.verticalCenter: parent.verticalCenter
                           text: String(tomEventCard.modelData.timeDisplay || "All day")
                           color: tomEventCard.modelData.allDay ? Qt.darker(root.contentForeground, 1.4) : Color.accent
@@ -3241,6 +3302,7 @@ Panel {
                         }
 
                         Text {
+                          textFormat: Text.PlainText
                           anchors.verticalCenter: parent.verticalCenter
                           text: "• " + String(tomEventCard.modelData.calendarName || "Event")
                           color: Qt.darker(root.contentForeground, 1.8)
@@ -3251,6 +3313,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: String(tomEventCard.modelData.summary || "Untitled Event")
                         color: root.contentForeground
@@ -3272,12 +3335,14 @@ Panel {
                           visible: tomEventCard.modelData.meetUrl !== ""
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰕧"
                             color: "#34A853"
                             font.family: root.contentFontFamily
                             font.pixelSize: Style.font.caption
                           }
                           Text {
+                            textFormat: Text.PlainText
                             text: "Google Meet"
                             color: "#34A853"
                             font.family: root.contentFontFamily
@@ -3291,12 +3356,14 @@ Panel {
                           visible: tomEventCard.modelData.location !== "" && tomEventCard.modelData.meetUrl === ""
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰍎"
                             color: Qt.darker(root.contentForeground, 1.6)
                             font.family: root.contentFontFamily
                             font.pixelSize: Style.font.caption
                           }
                           Text {
+                            textFormat: Text.PlainText
                             text: String(tomEventCard.modelData.location)
                             color: Qt.darker(root.contentForeground, 1.6)
                             font.family: root.contentFontFamily
@@ -3330,6 +3397,7 @@ Panel {
                           spacing: Style.space(4)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰕧"
                             color: "#ffffff"
                             font.family: root.contentFontFamily
@@ -3338,6 +3406,7 @@ Panel {
                           }
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "Join"
                             color: "#ffffff"
                             font.family: root.contentFontFamily
@@ -3407,6 +3476,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
                   text: "GOOGLE CALENDAR SETTINGS"
                   color: root.contentForeground
@@ -3418,6 +3488,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.syncStatusText
@@ -3447,6 +3518,7 @@ Panel {
                 spacing: Style.space(12)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "DISPLAY & AGENDA OPTIONS"
                   color: root.contentForeground
                   font.family: root.contentFontFamily
@@ -3466,6 +3538,7 @@ Panel {
                     spacing: 2
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Show Next Event in Top Bar"
                       color: root.contentForeground
                       font.family: root.contentFontFamily
@@ -3474,6 +3547,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Displays your upcoming event title and time countdown next to the clock on the top bar"
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
@@ -3508,6 +3582,7 @@ Panel {
                     spacing: 2
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Show Only Upcoming Events in Agenda"
                       color: root.contentForeground
                       font.family: root.contentFontFamily
@@ -3516,6 +3591,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Hides completed/past events from today's agenda schedule view"
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
@@ -3550,6 +3626,7 @@ Panel {
                     spacing: 2
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Show Tomorrow's Events in Agenda"
                       color: root.contentForeground
                       font.family: root.contentFontFamily
@@ -3558,6 +3635,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Appends tomorrow's schedule below today's agenda (and looks ahead on top bar when today is finished)"
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
@@ -3601,6 +3679,7 @@ Panel {
                   height: testNotifBtn.implicitHeight
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     text: "EVENT NOTIFICATIONS"
@@ -3634,6 +3713,7 @@ Panel {
                     spacing: 2
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Desktop Reminders"
                       color: root.contentForeground
                       font.family: root.contentFontFamily
@@ -3642,6 +3722,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Send desktop notifications for upcoming events and meetings with 1-click Join button"
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
@@ -3666,6 +3747,7 @@ Panel {
                   spacing: Style.space(6)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "REMIND ME IN ADVANCE:"
                     color: Qt.darker(root.contentForeground, 1.6)
                     font.family: root.contentFontFamily
@@ -3698,6 +3780,7 @@ Panel {
                         border.color: isSelected ? Color.accent : "transparent"
 
                         Text {
+                          textFormat: Text.PlainText
                           id: timeChipText
                           anchors.centerIn: parent
                           text: timeChip.modelData.label
@@ -3731,6 +3814,7 @@ Panel {
                     spacing: 2
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Notify at Start Time"
                       color: root.contentForeground
                       font.family: root.contentFontFamily
@@ -3739,6 +3823,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Send an additional notification at the exact start time of the event"
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
@@ -3768,6 +3853,7 @@ Panel {
                     spacing: 2
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Stay on Screen Until Clicked"
                       color: root.contentForeground
                       font.family: root.contentFontFamily
@@ -3776,6 +3862,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Keep reminders visible indefinitely until you click to join or dismiss"
                       color: Qt.darker(root.contentForeground, 1.8)
                       font.family: root.contentFontFamily
@@ -3820,6 +3907,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: "GOOGLE CLOUD TWO-WAY SYNC (OAUTH 2.0)"
                     color: root.contentForeground
@@ -3837,6 +3925,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
 
                     Text {
+                      textFormat: Text.PlainText
                       id: statusBadge
                       anchors.centerIn: parent
                       text: root.isCloudConnected ? "Connected" : (root.hasClientCredentials ? "Ready to Connect" : "Setup Required")
@@ -3849,6 +3938,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   text: root.isCloudConnected
                     ? "Your Google Calendar account is connected. Any events you create or delete in the clock will sync directly with Google Cloud servers and your other devices."
@@ -3888,6 +3978,7 @@ Panel {
                   spacing: Style.space(6)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "BACKGROUND AUTO-SYNC INTERVAL:"
                     color: Qt.darker(root.contentForeground, 1.6)
                     font.family: root.contentFontFamily
@@ -3920,6 +4011,7 @@ Panel {
                         border.color: isSelected ? Color.accent : "transparent"
 
                         Text {
+                          textFormat: Text.PlainText
                           id: syncChipText
                           anchors.centerIn: parent
                           text: syncChip.modelData.label
@@ -3952,6 +4044,7 @@ Panel {
                     spacing: Style.space(8)
 
                     Text {
+                      textFormat: Text.PlainText
                       anchors.verticalCenter: parent.verticalCenter
                       text: "CALENDAR VISIBILITY & FILTERS"
                       color: Qt.darker(root.contentForeground, 1.4)
@@ -3962,6 +4055,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       anchors.verticalCenter: parent.verticalCenter
                       text: "(Toggle on/off to filter events)"
                       color: Qt.darker(root.contentForeground, 2.0)
@@ -4011,6 +4105,7 @@ Panel {
                           }
 
                           Text {
+                            textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
                             text: String(cloudCalCard.modelData.summary || "Calendar")
                             color: cloudCalCard.isEnabled ? root.contentForeground : Qt.darker(root.contentForeground, 2.0)
@@ -4071,7 +4166,7 @@ Panel {
                       iconText: "󰌷"
                       foreground: root.contentForeground
                       onClicked: {
-                        if (root.currentAuthUrl) Quickshell.execDetached(["xdg-open", root.currentAuthUrl])
+                        if (root.currentAuthUrl && Model.isValidGoogleAuthUrl(root.currentAuthUrl)) Quickshell.execDetached(["xdg-open", "--", root.currentAuthUrl])
                         else root.startGoogleAuth()
                       }
                     }
@@ -4085,6 +4180,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Enter your Google Cloud OAuth Client ID and Secret:"
                     color: Qt.darker(root.contentForeground, 1.3)
                     font.family: root.contentFontFamily
@@ -4146,6 +4242,7 @@ Panel {
               visible: root.calendars.length > 0
 
               Text {
+                textFormat: Text.PlainText
                 text: "CONNECTED ICAL FEEDS (" + root.calendars.length + ")"
                 color: Qt.darker(root.contentForeground, 1.6)
                 font.family: root.contentFontFamily
@@ -4189,6 +4286,7 @@ Panel {
                       spacing: 1
 
                       Text {
+                        textFormat: Text.PlainText
                         text: String(calRow.modelData.name || "Calendar")
                         color: root.contentForeground
                         font.family: root.contentFontFamily
@@ -4199,6 +4297,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         text: String(calRow.modelData.url || "")
                         color: Qt.darker(root.contentForeground, 2.0)
                         font.family: root.contentFontFamily
@@ -4245,6 +4344,7 @@ Panel {
                 property string selectedColor: Model.PRESET_COLORS[0]
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "ADD ICAL / SECRET URL FEED"
                   color: root.contentForeground
                   font.family: root.contentFontFamily
@@ -4379,6 +4479,7 @@ Panel {
             spacing: Style.space(10)
 
             Text {
+              textFormat: Text.PlainText
               text: "󰆴"
               color: Color.urgent || "#EA4335"
               font.family: root.contentFontFamily
@@ -4392,6 +4493,7 @@ Panel {
               width: parent.width - Style.space(40)
 
               Text {
+                textFormat: Text.PlainText
                 text: "Delete Recurring Event"
                 color: root.contentForeground
                 font.family: root.contentFontFamily
@@ -4400,6 +4502,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: root.pendingDeleteEvent ? String(root.pendingDeleteEvent.summary || "Event") : ""
                 color: Qt.darker(root.contentForeground, 1.4)
                 font.family: root.contentFontFamily
@@ -4411,6 +4514,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: "This is a repeating event. Which occurrences would you like to delete?"
             color: Qt.darker(root.contentForeground, 1.3)
             font.family: root.contentFontFamily
@@ -4440,6 +4544,7 @@ Panel {
                 spacing: Style.space(10)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "󰄲"
                   color: Color.accent
                   font.family: root.contentFontFamily
@@ -4452,6 +4557,7 @@ Panel {
                   spacing: 1
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "This event only"
                     color: root.contentForeground
                     font.family: root.contentFontFamily
@@ -4460,6 +4566,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Only delete this occurrence on " + (root.pendingDeleteEvent ? String(root.pendingDeleteEvent.dateKey || "") : "")
                     color: Qt.darker(root.contentForeground, 1.6)
                     font.family: root.contentFontFamily
@@ -4497,6 +4604,7 @@ Panel {
                 spacing: Style.space(10)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "󰒭"
                   color: Color.accent
                   font.family: root.contentFontFamily
@@ -4509,6 +4617,7 @@ Panel {
                   spacing: 1
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "This and all following events"
                     color: root.contentForeground
                     font.family: root.contentFontFamily
@@ -4517,6 +4626,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Stop recurrence and remove all future occurrences"
                     color: Qt.darker(root.contentForeground, 1.6)
                     font.family: root.contentFontFamily
@@ -4554,6 +4664,7 @@ Panel {
                 spacing: Style.space(10)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "󰆴"
                   color: Color.urgent || "#EA4335"
                   font.family: root.contentFontFamily
@@ -4566,6 +4677,7 @@ Panel {
                   spacing: 1
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "All events in the series"
                     color: root.contentForeground
                     font.family: root.contentFontFamily
@@ -4574,6 +4686,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Permanently delete every occurrence in the series"
                     color: Qt.darker(root.contentForeground, 1.6)
                     font.family: root.contentFontFamily

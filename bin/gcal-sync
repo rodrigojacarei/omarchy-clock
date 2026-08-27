@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Google Calendar Two-Way Multi-Calendar Cloud Sync CLI for Omarchy Clock.
-Handles OAuth 2.0 authentication, listing all calendars in account,
-fetching events across all calendars, adding and deleting events.
+Handles OAuth 2.0 authentication with PKCE & state validation, secure 0600 storage,
+listing all calendars in account, fetching events across all calendars, adding and deleting events.
 """
 
 import sys
@@ -16,55 +16,110 @@ import socketserver
 import subprocess
 import threading
 import uuid
+import secrets
+import hashlib
+import base64
+import time
 from datetime import datetime, timedelta, timezone
 
 CONFIG_DIR = os.path.expanduser("~/.config/omarchy-clock")
 AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
 CLIENT_FILE = os.path.join(CONFIG_DIR, "client.json")
+CALENDARS_FILE = os.path.join(CONFIG_DIR, "calendars.json")
+LOCAL_EVENTS_FILE = os.path.join(CONFIG_DIR, "local_events.json")
+DISABLED_CALS_FILE = os.path.join(CONFIG_DIR, "disabled_calendars.json")
+
 CACHE_DIR = os.path.expanduser("~/.cache/omarchy/clock")
 API_CACHE_FILE = os.path.join(CACHE_DIR, "api_events.json")
 CLOUD_CALS_FILE = os.path.join(CACHE_DIR, "cloud_calendars.json")
+ICS_CACHE_FILE = os.path.join(CACHE_DIR, "ics_cache.json")
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.readonly"
 ]
 
-def load_client_credentials():
-    client_id = ""
-    client_secret = ""
-    if os.path.exists(CLIENT_FILE):
+def ensure_private_dir(dir_path):
+    os.makedirs(dir_path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(dir_path, 0o700)
+    except OSError:
+        pass
+
+def atomic_write_json(file_path, data, mode=0o600):
+    target_dir = os.path.dirname(file_path)
+    ensure_private_dir(target_dir)
+
+    # Reject symlinks and non-regular files
+    if os.path.islink(file_path):
+        raise ValueError(f"Refusing to write to symlink: {file_path}")
+    if os.path.exists(file_path) and not os.path.isfile(file_path):
+        raise ValueError(f"Target is not a regular file: {file_path}")
+
+    tmp_file = f"{file_path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(tmp_file, flags, mode)
+        with open(fd, "w", encoding="utf-8") as f:
+            if isinstance(data, str):
+                f.write(data)
+            else:
+                json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(fd)
+
+        if os.path.islink(file_path):
+            raise ValueError(f"Target changed to symlink: {file_path}")
+
+        os.replace(tmp_file, file_path)
         try:
-            with open(CLIENT_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if "installed" in data:
-                    data = data["installed"]
-                elif "web" in data:
-                    data = data["web"]
-                client_id = data.get("client_id", "")
-                client_secret = data.get("client_secret", "")
-        except Exception:
+            os.chmod(file_path, mode)
+        except OSError:
             pass
+    finally:
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+            except OSError:
+                pass
+
+def safe_read_json(file_path, default=None):
+    if not os.path.exists(file_path):
+        return default
+    if os.path.islink(file_path) or not os.path.isfile(file_path):
+        print(f"Warning: Refusing to read symlink or non-regular file: {file_path}", file=sys.stderr)
+        return default
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}", file=sys.stderr)
+        return default
+
+def load_client_credentials():
+    data = safe_read_json(CLIENT_FILE, default={})
+    if not isinstance(data, dict):
+        return "", ""
+    if "installed" in data and isinstance(data["installed"], dict):
+        data = data["installed"]
+    elif "web" in data and isinstance(data["web"], dict):
+        data = data["web"]
+    client_id = str(data.get("client_id", "")).strip()
+    client_secret = str(data.get("client_secret", "")).strip()
     return client_id, client_secret
 
 def save_client_credentials(client_id, client_secret):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CLIENT_FILE, "w", encoding="utf-8") as f:
-        json.dump({"client_id": client_id, "client_secret": client_secret}, f, indent=2)
+    clean_id = str(client_id).strip()
+    clean_secret = str(client_secret).strip()
+    atomic_write_json(CLIENT_FILE, {"client_id": clean_id, "client_secret": clean_secret}, mode=0o600)
 
 def load_auth():
-    if os.path.exists(AUTH_FILE):
-        try:
-            with open(AUTH_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return None
+    return safe_read_json(AUTH_FILE, default=None)
 
 def save_auth(auth_data):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(AUTH_FILE, "w", encoding="utf-8") as f:
-        json.dump(auth_data, f, indent=2)
+    atomic_write_json(AUTH_FILE, auth_data, mode=0o600)
 
 def get_valid_access_token():
     auth = load_auth()
@@ -106,6 +161,12 @@ def start_oauth_flow():
         print("MISSING_CREDENTIALS")
         return False
 
+    expected_state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).decode("ascii").rstrip("=")
+
     auth_code_holder = {"code": None, "error": None}
     server_holder = {"server": None}
 
@@ -116,6 +177,16 @@ def start_oauth_flow():
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
+
+            received_state = query.get("state", [None])[0]
+            if not received_state or not secrets.compare_digest(received_state, expected_state):
+                auth_code_holder["error"] = "Invalid or missing OAuth state"
+                self.send_response(400)
+                self.send_header("Content-type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h1>Authentication Failed</h1><p>State parameter validation failed.</p>")
+                threading.Thread(target=lambda: server_holder["server"].shutdown()).start()
+                return
 
             if "code" in query:
                 auth_code_holder["code"] = query["code"][0]
@@ -141,11 +212,12 @@ def start_oauth_flow():
                 self.send_response(400)
                 self.send_header("Content-type", "text/html; charset=utf-8")
                 self.end_headers()
-                self.wfile.write(b"<h1>Authentication Failed</h1><p>Please try again.</p>")
+                self.wfile.write(b"<h1>Authentication Failed</h1><p>Authorization error from provider.</p>")
 
             threading.Thread(target=lambda: server_holder["server"].shutdown()).start()
 
     port = 8765
+    httpd = None
     while port < 8790:
         try:
             httpd = socketserver.TCPServer(("127.0.0.1", port), OAuthCallbackHandler)
@@ -153,6 +225,10 @@ def start_oauth_flow():
             break
         except OSError:
             port += 1
+
+    if not httpd:
+        print("Error: Could not bind loopback port for OAuth callback", file=sys.stderr)
+        return False
 
     redirect_uri = f"http://127.0.0.1:{port}"
 
@@ -162,23 +238,35 @@ def start_oauth_flow():
         "response_type": "code",
         "scope": " ".join(SCOPES),
         "access_type": "offline",
-        "prompt": "consent"
+        "prompt": "consent",
+        "state": expected_state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256"
     }
 
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
     print(f"AUTH_URL:{auth_url}", flush=True)
 
     try:
-        subprocess.Popen(["xdg-open", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["xdg-open", "--", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         print(f"Failed to open browser with xdg-open: {e}", file=sys.stderr)
 
     print("Waiting for Google authorization...", flush=True)
-    httpd.serve_forever()
+    httpd.timeout = 1.0
+    start_time = time.time()
+    timeout_seconds = 120
+
+    while time.time() - start_time < timeout_seconds:
+        if auth_code_holder["code"] is not None or auth_code_holder["error"] is not None:
+            break
+        httpd.handle_request()
+
     httpd.server_close()
 
     if not auth_code_holder["code"]:
-        print(f"Authorization failed: {auth_code_holder.get('error', 'No code received')}", flush=True)
+        err = auth_code_holder.get("error") or "Timed out waiting for authorization"
+        print(f"Authorization failed: {err}", file=sys.stderr, flush=True)
         return False
 
     try:
@@ -186,6 +274,7 @@ def start_oauth_flow():
             "client_id": client_id,
             "client_secret": client_secret,
             "code": auth_code_holder["code"],
+            "code_verifier": code_verifier,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code"
         }).encode("utf-8")
@@ -218,9 +307,7 @@ def list_cloud_calendars():
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             items = data.get("items", [])
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(CLOUD_CALS_FILE, "w", encoding="utf-8") as f:
-                json.dump(items, f, indent=2)
+            atomic_write_json(CLOUD_CALS_FILE, items, mode=0o600)
             return items
     except Exception as e:
         print(f"Error fetching calendar list: {e}", file=sys.stderr)
@@ -273,9 +360,7 @@ def list_cloud_events(days_back=30, days_forward=90):
             # Ignore 404 or inaccessible secondary calendars
             pass
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(API_CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(all_events, f, indent=2)
+    atomic_write_json(API_CACHE_FILE, all_events, mode=0o600)
     return all_events, cals
 
 def get_system_timezone():
@@ -460,10 +545,17 @@ def main():
         print("  status                         Check Google Cloud OAuth status")
         print("  auth                           Authenticate with Google Calendar in browser")
         print("  logout                         Disconnect Google Calendar account")
+        print("  set-credentials <id> <secret>  Save OAuth client credentials securely")
+        print("  save-calendars <json>          Save iCal calendar list securely")
+        print("  save-local-events <json>       Save local events securely")
+        print("  save-disabled-calendars <json> Save disabled calendar IDs securely")
+        print("  save-ics-cache <json>          Save cached iCal data securely")
+        print("  load-all                       Load all config and cache data safely")
         print("  list-calendars                 List all Google Calendars in account")
         print("  list-cloud                     List events across all Google Calendars")
-        print("  create <title> <date> [all_day] [start] [end] [loc] [desc] [cal_id]")
-        print("  delete <event_id> [cal_id]     Delete an event from Google Calendar API")
+        print("  create <title> <date> [args]   Create an event on Google Calendar")
+        print("  delete <event_id> [cal_id]     Delete an event from Google Calendar")
+        print("  stop-recurrence <id> <d> [cal] Stop recurring event before date")
         return
 
     cmd = sys.argv[1].lower()
@@ -471,6 +563,71 @@ def main():
     if cmd == "status":
         status = get_auth_status()
         print(json.dumps(status))
+
+    elif cmd == "set-credentials":
+        if len(sys.argv) < 4:
+            print("Usage: gcal-sync set-credentials <client_id> <client_secret>", file=sys.stderr)
+            sys.exit(1)
+        c_id = sys.argv[2]
+        c_secret = sys.argv[3]
+        save_client_credentials(c_id, c_secret)
+        print("CREDENTIALS_SAVED")
+
+    elif cmd == "save-calendars":
+        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        try:
+            parsed = json.loads(raw)
+            atomic_write_json(CALENDARS_FILE, parsed, mode=0o600)
+            print("CALENDARS_SAVED")
+        except Exception as e:
+            print(f"Error saving calendars: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "save-local-events":
+        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        try:
+            parsed = json.loads(raw)
+            atomic_write_json(LOCAL_EVENTS_FILE, parsed, mode=0o600)
+            print("LOCAL_EVENTS_SAVED")
+        except Exception as e:
+            print(f"Error saving local events: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "save-disabled-calendars":
+        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        try:
+            parsed = json.loads(raw)
+            atomic_write_json(DISABLED_CALS_FILE, parsed, mode=0o600)
+            print("DISABLED_CALENDARS_SAVED")
+        except Exception as e:
+            print(f"Error saving disabled calendars: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "save-ics-cache":
+        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        try:
+            parsed = json.loads(raw)
+            atomic_write_json(ICS_CACHE_FILE, parsed, mode=0o600)
+            print("ICS_CACHE_SAVED")
+        except Exception as e:
+            print(f"Error saving ics cache: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "load-all":
+        cals = safe_read_json(CALENDARS_FILE, default=[])
+        local_evs = safe_read_json(LOCAL_EVENTS_FILE, default=[])
+        disabled_cals = safe_read_json(DISABLED_CALS_FILE, default=[])
+        cloud_cals = safe_read_json(CLOUD_CALS_FILE, default=[])
+        api_evs = safe_read_json(API_CACHE_FILE, default=[])
+        ics_cache = safe_read_json(ICS_CACHE_FILE, default={})
+        print(json.dumps({
+            "calendars": cals if isinstance(cals, list) else [],
+            "localEvents": local_evs if isinstance(local_evs, list) else [],
+            "disabledCalendars": disabled_cals if isinstance(disabled_cals, list) else [],
+            "cloudCalendars": cloud_cals if isinstance(cloud_cals, list) else [],
+            "cloudApiEvents": api_evs if isinstance(api_evs, list) else [],
+            "rawCalendarIcs": ics_cache if isinstance(ics_cache, dict) else {}
+        }))
 
     elif cmd == "list-calendars":
         cals = list_cloud_calendars()

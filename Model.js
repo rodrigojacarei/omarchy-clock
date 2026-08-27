@@ -260,10 +260,70 @@ function parseIcsDate(propValue, params) {
   }
 }
 
+function isValidHttpsUrl(urlString) {
+  if (!urlString || typeof urlString !== "string") return false
+  var clean = urlString.trim()
+  if (clean.indexOf("https://") !== 0) return false
+  if (/[\r\n\t\0\s<>"'`\\;\$|{}()^]/.test(clean)) return false
+  var match = clean.match(/^https:\/\/([a-zA-Z0-9.-]+)(:[0-9]+)?(\/[a-zA-Z0-9_.~!*@&=+?#%/-]*)?$/)
+  if (!match) return false
+  var host = match[1]
+  if (!host || host.indexOf("-") === 0 || host.lastIndexOf("-") === host.length - 1 || host.indexOf("..") !== -1) return false
+  return true
+}
+
+function normalizeIcsUrl(url) {
+  if (!url || typeof url !== "string") return ""
+  var clean = url.trim()
+  if (clean.indexOf("webcal://") === 0) {
+    clean = "https://" + clean.substring(9)
+  }
+  return isValidHttpsUrl(clean) ? clean : ""
+}
+
+function isValidMeetingUrl(urlString) {
+  if (!urlString || typeof urlString !== "string") return false
+  var clean = urlString.trim()
+  if (clean.indexOf("https://") !== 0) return false
+  if (/[\r\n\t\0\s<>"'`\\;\$|{}()^]/.test(clean)) return false
+
+  var match = clean.match(/^https:\/\/([a-zA-Z0-9.-]+)(:[0-9]+)?(\/[a-zA-Z0-9_.~!*@&=+?#%/-]*)?$/)
+  if (!match) return false
+
+  var host = match[1].toLowerCase()
+  var allowedHosts = [
+    "meet.google.com",
+    "zoom.us",
+    "teams.microsoft.com",
+    "teams.live.com",
+    "webex.com",
+    "meet.jit.si"
+  ]
+
+  for (var i = 0; i < allowedHosts.length; i++) {
+    var ah = allowedHosts[i]
+    if (host === ah || host.endsWith("." + ah)) {
+      return true
+    }
+  }
+  return false
+}
+
+function isValidGoogleAuthUrl(urlString) {
+  if (!urlString || typeof urlString !== "string") return false
+  var clean = urlString.trim()
+  if (clean.indexOf("https://accounts.google.com/") !== 0) return false
+  if (/[\r\n\t\0\s<>"'`\\;\$|{}()^]/.test(clean)) return false
+  return isValidHttpsUrl(clean)
+}
+
 function extractMeetUrl(text) {
-  if (!text) return ""
-  var match = String(text).match(/https:\/\/(meet\.google\.com\/[a-z0-9-]+|zoom\.us\/j\/[0-9]+|teams\.microsoft\.com\/l\/meetup-join\/[^>\s]+)/i)
-  return match ? match[0] : ""
+  if (!text || typeof text !== "string") return ""
+  var match = text.match(/https:\/\/(?:[a-zA-Z0-9.-]+\.)?(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com|meet\.jit\.si)(?::[0-9]+)?\/[a-zA-Z0-9_.~!*@&=+?#%/-]*/i)
+  if (match && isValidMeetingUrl(match[0])) {
+    return match[0]
+  }
+  return ""
 }
 
 function generateMeetUrl() {
@@ -280,6 +340,7 @@ function generateMeetUrl() {
 
 function parseIcs(rawIcs, calendarMeta) {
   if (!rawIcs || typeof rawIcs !== "string") return []
+  if (rawIcs.length > 5242880) return [] // Enforce 5MB strict byte cap
   if (rawIcs.indexOf("BEGIN:VCALENDAR") === -1) return []
 
   var meta = calendarMeta || {}
@@ -383,8 +444,9 @@ function parseIcs(rawIcs, calendarMeta) {
           }
           break
         case "URL":
-          if (!currentEvent.meetUrl && valPart.indexOf("http") === 0) {
-            currentEvent.meetUrl = valPart.replace(/^\s+|\s+$/g, "")
+          var cleanVal = valPart.replace(/^\s+|\s+$/g, "")
+          if (!currentEvent.meetUrl && isValidMeetingUrl(cleanVal)) {
+            currentEvent.meetUrl = cleanVal
           }
           break
       }
@@ -778,6 +840,10 @@ if (typeof module !== "undefined") {
     clockFormatRing: clockFormatRing,
     nextClockFormat: nextClockFormat,
     isoWeekLiteral: isoWeekLiteral,
+    isValidHttpsUrl: isValidHttpsUrl,
+    normalizeIcsUrl: normalizeIcsUrl,
+    isValidMeetingUrl: isValidMeetingUrl,
+    isValidGoogleAuthUrl: isValidGoogleAuthUrl,
     parseIcs: parseIcs,
     parseIcsDate: parseIcsDate,
     parseRRule: parseRRule,
@@ -823,15 +889,18 @@ function parseGoogleApiEvents(apiItems, calColor) {
 
     if (!dKey) continue
 
-    var meet = it.hangoutLink || extractMeetUrl(it.location) || extractMeetUrl(it.description)
+    var meet = (it.hangoutLink && isValidMeetingUrl(it.hangoutLink)) ? it.hangoutLink : ""
     if (!meet && it.conferenceData && it.conferenceData.entryPoints) {
       for (var ep = 0; ep < it.conferenceData.entryPoints.length; ep++) {
         var entry = it.conferenceData.entryPoints[ep]
-        if (entry && (entry.entryPointType === "video" || entry.uri) && String(entry.uri || "").indexOf("http") === 0) {
+        if (entry && entry.uri && isValidMeetingUrl(entry.uri)) {
           meet = entry.uri
           break
         }
       }
+    }
+    if (!meet) {
+      meet = extractMeetUrl(it.location) || extractMeetUrl(it.description)
     }
 
     var cName = it.calendarName || "Google Calendar"

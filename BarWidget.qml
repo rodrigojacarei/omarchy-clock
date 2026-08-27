@@ -134,7 +134,7 @@ BarWidget {
         glyph,
         title,
         body,
-        String(item.event.meetUrl || ""),
+        (item.event.meetUrl && Model.isValidMeetingUrl(item.event.meetUrl)) ? String(item.event.meetUrl).trim() : "",
         root.persistentNotifications ? "critical" : "normal"
       ])
     }
@@ -275,8 +275,8 @@ BarWidget {
       if (b === Qt.RightButton) {
         root.cycleFormat()
       } else if (b === Qt.MiddleButton) {
-        if (root.nextEvent && root.nextEvent.meetUrl) {
-          Quickshell.execDetached(["xdg-open", root.nextEvent.meetUrl])
+        if (root.nextEvent && root.nextEvent.meetUrl && Model.isValidMeetingUrl(root.nextEvent.meetUrl)) {
+          Quickshell.execDetached(["xdg-open", "--", String(root.nextEvent.meetUrl).trim()])
         } else if (root.bar) {
           root.bar.run("omarchy-menu-timezone")
         }
@@ -299,6 +299,7 @@ BarWidget {
         font.family: button.fontFamily
         font.pixelSize: button.fontSize
         renderType: Text.NativeRendering
+        textFormat: Text.PlainText
       }
 
       Rectangle {
@@ -321,6 +322,7 @@ BarWidget {
           font.family: button.fontFamily
           font.pixelSize: button.fontSize
           renderType: Text.NativeRendering
+          textFormat: Text.PlainText
         }
 
         Text {
@@ -332,6 +334,7 @@ BarWidget {
           renderType: Text.NativeRendering
           elide: Text.ElideRight
           maximumLineCount: 1
+          textFormat: Text.PlainText
         }
       }
     }
