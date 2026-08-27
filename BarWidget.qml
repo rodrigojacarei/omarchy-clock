@@ -7,7 +7,7 @@ import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "rodrigo.clock"
+  moduleName: "omarchy-clock"
 
   property date displayDate: clock.date
 
@@ -190,39 +190,6 @@ BarWidget {
 
   IpcHandler {
     target: "omarchy-clock"
-
-    function refresh(): void { root.broadcast("refresh") }
-    function cycleFormat(): void { root.cycleFormat() }
-    function toggleWeekStart(): void { root.toggleWeekStart() }
-    function open(): void {
-      if (panelLoader.item) {
-        panelLoader.item.showSettings = false
-        panelLoader.item.showAddEvent = false
-      }
-      root.open()
-    }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.togglePanel() }
-    function openSettings(): void {
-      root.open()
-      if (panelLoader.item) {
-        panelLoader.item.showAddEvent = false
-        panelLoader.item.showSettings = true
-      }
-    }
-    function openAddEvent(): void {
-      root.open()
-      if (panelLoader.item) {
-        panelLoader.item.showSettings = false
-        panelLoader.item.showAddEvent = true
-      }
-    }
-  }
-
-  IpcHandler {
-    target: "rodrigo.clock"
 
     function refresh(): void { root.broadcast("refresh") }
     function cycleFormat(): void { root.cycleFormat() }

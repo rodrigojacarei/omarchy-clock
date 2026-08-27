@@ -30,16 +30,16 @@ CMD="${1:-toggle}"
 
 case "$CMD" in
   toggle)
-    omarchy-shell omarchy-clock toggle 2>/dev/null || omarchy-shell rodrigo.clock toggle 2>/dev/null || true
+    omarchy-shell omarchy-clock toggle
     ;;
   open|show)
-    omarchy-shell omarchy-clock open 2>/dev/null || omarchy-shell rodrigo.clock open 2>/dev/null || true
+    omarchy-shell omarchy-clock open
     ;;
   close|hide)
-    omarchy-shell omarchy-clock close 2>/dev/null || omarchy-shell rodrigo.clock close 2>/dev/null || true
+    omarchy-shell omarchy-clock close
     ;;
   sync)
-    omarchy-shell omarchy-clock sync 2>/dev/null || omarchy-shell rodrigo.clock sync 2>/dev/null || true
+    omarchy-shell omarchy-clock sync 2>/dev/null || true
     echo "Triggered calendar synchronization"
     ;;
   status|auth|logout|create|list-cloud)

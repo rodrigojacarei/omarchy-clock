@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "rodrigo.clock"
-  ipcTarget: "rodrigo.clock"
+  moduleName: "omarchy-clock"
+  ipcTarget: "omarchy-clock"
   manageIpc: false
 
   property var anchorItem: null
