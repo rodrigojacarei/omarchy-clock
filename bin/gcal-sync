@@ -7,7 +7,10 @@ listing all calendars in account, fetching events across all calendars, adding a
 
 import sys
 import os
+import stat
 import json
+import socket
+import ipaddress
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -33,6 +36,8 @@ CACHE_DIR = os.path.expanduser("~/.cache/omarchy/clock")
 API_CACHE_FILE = os.path.join(CACHE_DIR, "api_events.json")
 CLOUD_CALS_FILE = os.path.join(CACHE_DIR, "cloud_calendars.json")
 ICS_CACHE_FILE = os.path.join(CACHE_DIR, "ics_cache.json")
+
+MAX_FILE_BYTES = 5 * 1024 * 1024  # 5MB ceiling
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
@@ -85,18 +90,164 @@ def atomic_write_json(file_path, data, mode=0o600):
             except OSError:
                 pass
 
-def safe_read_json(file_path, default=None):
+def safe_read_json(file_path, default=None, max_bytes=MAX_FILE_BYTES):
     if not os.path.exists(file_path):
         return default
-    if os.path.islink(file_path) or not os.path.isfile(file_path):
-        print(f"Warning: Refusing to read symlink or non-regular file: {file_path}", file=sys.stderr)
-        return default
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+
+    fd = -1
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error reading {file_path}: {e}", file=sys.stderr)
+        # Open once with O_NOFOLLOW | O_NONBLOCK to eliminate TOCTOU and FIFO blocking
+        fd = os.open(file_path, flags)
+    except OSError:
         return default
+
+    try:
+        st = os.fstat(fd)
+        # Verify descriptor is a regular file
+        if not stat.S_ISREG(st.st_mode):
+            return default
+
+        # If file size is already reported larger than ceiling, reject immediately
+        if st.st_size > max_bytes:
+            return default
+
+        # Read at most max_bytes + 1 bytes from that same descriptor
+        chunks = []
+        bytes_read = 0
+        while bytes_read <= max_bytes:
+            chunk = os.read(fd, min(65536, max_bytes + 1 - bytes_read))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+
+        if bytes_read > max_bytes:
+            # File exceeded byte ceiling
+            return default
+
+        raw_data = b"".join(chunks)
+        if not raw_data.strip():
+            return default
+
+        return json.loads(raw_data.decode("utf-8"))
+    except Exception:
+        return default
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+def is_public_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return False
+        if isinstance(ip, ipaddress.IPv4Address):
+            if ip in ipaddress.ip_network("100.64.0.0/10"):
+                return False
+            if ip in ipaddress.ip_network("192.0.0.0/24"):
+                return False
+            if ip in ipaddress.ip_network("192.0.2.0/24"):
+                return False
+            if ip in ipaddress.ip_network("198.51.100.0/24"):
+                return False
+            if ip in ipaddress.ip_network("203.0.113.0/24"):
+                return False
+            if ip in ipaddress.ip_network("240.0.0.0/4"):
+                return False
+        if isinstance(ip, ipaddress.IPv6Address):
+            if ip in ipaddress.ip_network("2001:db8::/32"):
+                return False
+            if ip.ipv4_mapped and not is_public_ip(str(ip.ipv4_mapped)):
+                return False
+        return True
+    except Exception:
+        return False
+
+def validate_public_destination(url_str):
+    parsed = urllib.parse.urlparse(url_str)
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"Disallowed scheme '{parsed.scheme}'; only https is allowed")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Missing hostname in URL")
+
+    host_lower = hostname.lower().strip(".")
+    if host_lower in ("localhost", "localhost.localdomain") or host_lower.endswith((".localhost", ".local", ".internal", ".lan", ".home.arpa")):
+        raise ValueError(f"Prohibited internal host: {hostname}")
+
+    port = parsed.port or 443
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise ValueError(f"Could not resolve host {hostname}: {e}")
+
+    if not addr_info:
+        raise ValueError(f"No IP addresses resolved for {hostname}")
+
+    for family, socktype, proto, canonname, sockaddr in addr_info:
+        ip_addr = sockaddr[0]
+        if not is_public_ip(ip_addr):
+            raise ValueError(f"Destination IP {ip_addr} for {hostname} is not a public address (SSRF protection)")
+
+    return True
+
+def fetch_ical_feed(url_str, max_bytes=5242880, timeout=15):
+    validate_public_destination(url_str)
+
+    max_redirects = 3
+    redirect_count = 0
+
+    class PublicDestinationRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            nonlocal redirect_count
+            redirect_count += 1
+            if redirect_count > max_redirects:
+                raise ValueError(f"Too many redirects (max {max_redirects})")
+
+            # Validate each redirect hop against public destination policy
+            validate_public_destination(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = urllib.request.build_opener(PublicDestinationRedirectHandler)
+    req = urllib.request.Request(
+        url_str,
+        headers={"User-Agent": "OmarchyClock/1.0 (+https://github.com/rodrigojacarei/omarchy-clock)"}
+    )
+
+    with opener.open(req, timeout=timeout) as resp:
+        cl = resp.headers.get("Content-Length")
+        if cl:
+            try:
+                if int(cl) > max_bytes:
+                    raise ValueError(f"Content-Length {cl} exceeds maximum limit {max_bytes} bytes")
+            except ValueError:
+                pass
+
+        chunks = []
+        total_read = 0
+        while total_read <= max_bytes:
+            chunk = resp.read(min(65536, max_bytes + 1 - total_read))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_read += len(chunk)
+
+        if total_read > max_bytes:
+            raise ValueError(f"Response size exceeded {max_bytes} bytes")
+
+        raw_bytes = b"".join(chunks)
+        return raw_bytes.decode("utf-8", errors="replace")
 
 def load_client_credentials():
     data = safe_read_json(CLIENT_FILE, default={})
@@ -545,17 +696,18 @@ def main():
         print("  status                         Check Google Cloud OAuth status")
         print("  auth                           Authenticate with Google Calendar in browser")
         print("  logout                         Disconnect Google Calendar account")
-        print("  set-credentials <id> <secret>  Save OAuth client credentials securely")
-        print("  save-calendars <json>          Save iCal calendar list securely")
-        print("  save-local-events <json>       Save local events securely")
-        print("  save-disabled-calendars <json> Save disabled calendar IDs securely")
-        print("  save-ics-cache <json>          Save cached iCal data securely")
+        print("  set-credentials                Save OAuth client credentials from JSON on stdin")
+        print("  save-calendars                 Save iCal calendar list from JSON on stdin")
+        print("  save-local-events              Save local events from JSON on stdin")
+        print("  save-disabled-calendars        Save disabled calendar IDs from JSON on stdin")
+        print("  save-ics-cache                 Save cached iCal data from JSON on stdin")
+        print("  fetch-ical                     Fetch iCal URL passed via stdin (SSRF-protected)")
         print("  load-all                       Load all config and cache data safely")
         print("  list-calendars                 List all Google Calendars in account")
         print("  list-cloud                     List events across all Google Calendars")
-        print("  create <title> <date> [args]   Create an event on Google Calendar")
-        print("  delete <event_id> [cal_id]     Delete an event from Google Calendar")
-        print("  stop-recurrence <id> <d> [cal] Stop recurring event before date")
+        print("  create                         Create an event from JSON on stdin")
+        print("  delete                         Delete an event from JSON on stdin")
+        print("  stop-recurrence                Stop recurring event from JSON on stdin")
         return
 
     cmd = sys.argv[1].lower()
@@ -565,16 +717,36 @@ def main():
         print(json.dumps(status))
 
     elif cmd == "set-credentials":
-        if len(sys.argv) < 4:
-            print("Usage: gcal-sync set-credentials <client_id> <client_secret>", file=sys.stderr)
+        raw = sys.stdin.read(65536) if not sys.stdin.isatty() else ""
+        c_id = ""
+        c_secret = ""
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+                c_id = str(parsed.get("client_id", "")).strip()
+                c_secret = str(parsed.get("client_secret", "")).strip()
+            except Exception:
+                # In case line-based input was supplied
+                lines = raw.strip().split("\n")
+                if len(lines) >= 2:
+                    c_id = lines[0].strip()
+                    c_secret = lines[1].strip()
+        elif len(sys.argv) >= 4:
+            c_id = sys.argv[2].strip()
+            c_secret = sys.argv[3].strip()
+
+        if not c_id or not c_secret:
+            print("Error: Missing client_id or client_secret", file=sys.stderr)
             sys.exit(1)
-        c_id = sys.argv[2]
-        c_secret = sys.argv[3]
+
         save_client_credentials(c_id, c_secret)
         print("CREDENTIALS_SAVED")
 
     elif cmd == "save-calendars":
-        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        raw = sys.stdin.read(MAX_FILE_BYTES + 1) if not sys.stdin.isatty() else (sys.argv[2] if len(sys.argv) > 2 else "")
+        if len(raw) > MAX_FILE_BYTES:
+            print(f"Error: Payload exceeds maximum limit {MAX_FILE_BYTES} bytes", file=sys.stderr)
+            sys.exit(1)
         try:
             parsed = json.loads(raw)
             atomic_write_json(CALENDARS_FILE, parsed, mode=0o600)
@@ -584,7 +756,10 @@ def main():
             sys.exit(1)
 
     elif cmd == "save-local-events":
-        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        raw = sys.stdin.read(MAX_FILE_BYTES + 1) if not sys.stdin.isatty() else (sys.argv[2] if len(sys.argv) > 2 else "")
+        if len(raw) > MAX_FILE_BYTES:
+            print(f"Error: Payload exceeds maximum limit {MAX_FILE_BYTES} bytes", file=sys.stderr)
+            sys.exit(1)
         try:
             parsed = json.loads(raw)
             atomic_write_json(LOCAL_EVENTS_FILE, parsed, mode=0o600)
@@ -594,7 +769,10 @@ def main():
             sys.exit(1)
 
     elif cmd == "save-disabled-calendars":
-        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        raw = sys.stdin.read(MAX_FILE_BYTES + 1) if not sys.stdin.isatty() else (sys.argv[2] if len(sys.argv) > 2 else "")
+        if len(raw) > MAX_FILE_BYTES:
+            print(f"Error: Payload exceeds maximum limit {MAX_FILE_BYTES} bytes", file=sys.stderr)
+            sys.exit(1)
         try:
             parsed = json.loads(raw)
             atomic_write_json(DISABLED_CALS_FILE, parsed, mode=0o600)
@@ -604,13 +782,28 @@ def main():
             sys.exit(1)
 
     elif cmd == "save-ics-cache":
-        raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+        raw = sys.stdin.read(MAX_FILE_BYTES + 1) if not sys.stdin.isatty() else (sys.argv[2] if len(sys.argv) > 2 else "")
+        if len(raw) > MAX_FILE_BYTES:
+            print(f"Error: Payload exceeds maximum limit {MAX_FILE_BYTES} bytes", file=sys.stderr)
+            sys.exit(1)
         try:
             parsed = json.loads(raw)
             atomic_write_json(ICS_CACHE_FILE, parsed, mode=0o600)
             print("ICS_CACHE_SAVED")
         except Exception as e:
             print(f"Error saving ics cache: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "fetch-ical":
+        url_input = sys.stdin.read(4096).strip() if not sys.stdin.isatty() else (sys.argv[2].strip() if len(sys.argv) > 2 else "")
+        if not url_input:
+            print("Error: Missing iCal URL", file=sys.stderr)
+            sys.exit(1)
+        try:
+            content = fetch_ical_feed(url_input, max_bytes=MAX_FILE_BYTES, timeout=15)
+            print(content, end="")
+        except Exception as e:
+            print(f"Error fetching iCal feed: {e}", file=sys.stderr)
             sys.exit(1)
 
     elif cmd == "load-all":
@@ -651,19 +844,37 @@ def main():
         print(json.dumps({"calendars": cals, "events": events}, indent=2))
 
     elif cmd == "create":
-        if len(sys.argv) < 4:
-            print("Usage: gcal-sync create <title> <date> [all_day:0/1] [start] [end] [location] [description] [cal_id] [rrule] [add_meet:0/1]")
+        raw = sys.stdin.read(MAX_FILE_BYTES) if not sys.stdin.isatty() else ""
+        if raw.strip():
+            try:
+                data = json.loads(raw)
+                summary = str(data.get("summary", "")).strip()
+                date_key = str(data.get("date_key", "")).strip()
+                all_day = bool(data.get("all_day", False))
+                start = str(data.get("start", "09:00")).strip()
+                end = str(data.get("end", "10:00")).strip()
+                location = str(data.get("location", "")).strip()
+                description = str(data.get("description", "")).strip()
+                cal_id = str(data.get("cal_id", "primary")).strip()
+                rrule = str(data.get("rrule", "")).strip()
+                add_meet = bool(data.get("add_meet", False))
+            except Exception as e:
+                print(f"Error parsing create payload: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif len(sys.argv) >= 4:
+            summary = sys.argv[2]
+            date_key = sys.argv[3]
+            all_day = sys.argv[4] in ("1", "true", "True") if len(sys.argv) > 4 else False
+            start = sys.argv[5] if len(sys.argv) > 5 else "09:00"
+            end = sys.argv[6] if len(sys.argv) > 6 else "10:00"
+            location = sys.argv[7] if len(sys.argv) > 7 else ""
+            description = sys.argv[8] if len(sys.argv) > 8 else ""
+            cal_id = sys.argv[9] if len(sys.argv) > 9 else "primary"
+            rrule = sys.argv[10] if len(sys.argv) > 10 else ""
+            add_meet = sys.argv[11] in ("1", "true", "True") if len(sys.argv) > 11 else False
+        else:
+            print("Usage: gcal-sync create (JSON payload via stdin)", file=sys.stderr)
             sys.exit(1)
-        summary = sys.argv[2]
-        date_key = sys.argv[3]
-        all_day = sys.argv[4] in ("1", "true", "True") if len(sys.argv) > 4 else False
-        start = sys.argv[5] if len(sys.argv) > 5 else "09:00"
-        end = sys.argv[6] if len(sys.argv) > 6 else "10:00"
-        location = sys.argv[7] if len(sys.argv) > 7 else ""
-        description = sys.argv[8] if len(sys.argv) > 8 else ""
-        cal_id = sys.argv[9] if len(sys.argv) > 9 else "primary"
-        rrule = sys.argv[10] if len(sys.argv) > 10 else ""
-        add_meet = sys.argv[11] in ("1", "true", "True") if len(sys.argv) > 11 else False
 
         res = create_cloud_event(summary, date_key, all_day, start, end, location, description, cal_id, rrule, add_meet)
         if res:
@@ -672,19 +883,39 @@ def main():
             sys.exit(1)
 
     elif cmd == "delete":
-        if len(sys.argv) < 3:
-            print("Usage: gcal-sync delete <event_id> [cal_id]")
+        raw = sys.stdin.read(65536) if not sys.stdin.isatty() else ""
+        if raw.strip():
+            try:
+                data = json.loads(raw)
+                event_id = str(data.get("event_id", "")).strip()
+                cal_id = str(data.get("cal_id", "primary")).strip()
+            except Exception:
+                sys.exit(1)
+        elif len(sys.argv) >= 3:
+            event_id = sys.argv[2]
+            cal_id = sys.argv[3] if len(sys.argv) > 3 else "primary"
+        else:
             sys.exit(1)
-        cal_id = sys.argv[3] if len(sys.argv) > 3 else "primary"
-        res = delete_cloud_event(sys.argv[2], cal_id)
+        res = delete_cloud_event(event_id, cal_id)
         sys.exit(0 if res else 1)
 
     elif cmd == "stop-recurrence":
-        if len(sys.argv) < 4:
-            print("Usage: gcal-sync stop-recurrence <master_event_id> <date_key> [cal_id]")
+        raw = sys.stdin.read(65536) if not sys.stdin.isatty() else ""
+        if raw.strip():
+            try:
+                data = json.loads(raw)
+                master_event_id = str(data.get("master_event_id", "")).strip()
+                date_key = str(data.get("date_key", "")).strip()
+                cal_id = str(data.get("cal_id", "primary")).strip()
+            except Exception:
+                sys.exit(1)
+        elif len(sys.argv) >= 4:
+            master_event_id = sys.argv[2]
+            date_key = sys.argv[3]
+            cal_id = sys.argv[4] if len(sys.argv) > 4 else "primary"
+        else:
             sys.exit(1)
-        cal_id = sys.argv[4] if len(sys.argv) > 4 else "primary"
-        res = stop_cloud_recurrence(sys.argv[2], sys.argv[3], cal_id)
+        res = stop_cloud_recurrence(master_event_id, date_key, cal_id)
         sys.exit(0 if res else 1)
 
     else:

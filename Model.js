@@ -260,6 +260,16 @@ function parseIcsDate(propValue, params) {
   }
 }
 
+function isPrivateOrLocalHost(host) {
+  if (!host || typeof host !== "string") return true
+  var h = host.toLowerCase().trim()
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".lan") || h.endsWith(".home.arpa")) return true
+  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h) || /^0\./.test(h)) return true
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) return true
+  if (h === "::1" || h === "[::1]" || h === "::" || h === "[::]") return true
+  return false
+}
+
 function isValidHttpsUrl(urlString) {
   if (!urlString || typeof urlString !== "string") return false
   var clean = urlString.trim()
@@ -269,6 +279,7 @@ function isValidHttpsUrl(urlString) {
   if (!match) return false
   var host = match[1]
   if (!host || host.indexOf("-") === 0 || host.lastIndexOf("-") === host.length - 1 || host.indexOf("..") !== -1) return false
+  if (isPrivateOrLocalHost(host)) return false
   return true
 }
 
@@ -840,6 +851,7 @@ if (typeof module !== "undefined") {
     clockFormatRing: clockFormatRing,
     nextClockFormat: nextClockFormat,
     isoWeekLiteral: isoWeekLiteral,
+    isPrivateOrLocalHost: isPrivateOrLocalHost,
     isValidHttpsUrl: isValidHttpsUrl,
     normalizeIcsUrl: normalizeIcsUrl,
     isValidMeetingUrl: isValidMeetingUrl,

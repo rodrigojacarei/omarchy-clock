@@ -270,32 +270,24 @@ Panel {
   }
 
   function setCredentials(cId, cSecret) {
-    setCredsProc.command = [
-      "python3",
-      root.gcalSyncBin,
-      "set-credentials",
-      String(cId || "").trim(),
-      String(cSecret || "").trim()
-    ]
+    setCredsProc.payload = JSON.stringify({
+      client_id: String(cId || "").trim(),
+      client_secret: String(cSecret || "").trim()
+    })
+    setCredsProc.running = false
     setCredsProc.running = true
   }
 
   function saveCalendars() {
-    Quickshell.execDetached([
-      "python3",
-      root.gcalSyncBin,
-      "save-calendars",
-      JSON.stringify(root.calendars)
-    ])
+    saveCalendarsProc.payload = JSON.stringify(root.calendars)
+    saveCalendarsProc.running = false
+    saveCalendarsProc.running = true
   }
 
   function saveLocalEvents() {
-    Quickshell.execDetached([
-      "python3",
-      root.gcalSyncBin,
-      "save-local-events",
-      JSON.stringify(root.localEvents)
-    ])
+    saveLocalEventsProc.payload = JSON.stringify(root.localEvents)
+    saveLocalEventsProc.running = false
+    saveLocalEventsProc.running = true
   }
 
   function isCalendarDisabled(calId) {
@@ -324,12 +316,9 @@ Panel {
   }
 
   function saveDisabledCalendars() {
-    Quickshell.execDetached([
-      "python3",
-      root.gcalSyncBin,
-      "save-disabled-calendars",
-      JSON.stringify(root.disabledCalendarIds)
-    ])
+    saveDisabledCalendarsProc.payload = JSON.stringify(root.disabledCalendarIds)
+    saveDisabledCalendarsProc.running = false
+    saveDisabledCalendarsProc.running = true
   }
 
   function addEvent(summary, dateKey, allDay, startTime, endTime, color, calendarName, location, description, calendarId, rrule, addMeet) {
@@ -344,21 +333,19 @@ Panel {
     var shouldAddMeet = !!addMeet
 
     if (root.isCloudConnected) {
-      createCloudEventProc.command = [
-        "python3",
-        root.gcalSyncBin,
-        "create",
-        cleanSummary,
-        cleanDateKey,
-        allDay ? "1" : "0",
-        String(startTime || "09:00").trim(),
-        String(endTime || "10:00").trim(),
-        cleanLoc,
-        cleanDesc,
-        targetCalId,
-        cleanRrule,
-        shouldAddMeet ? "1" : "0"
-      ]
+      createCloudEventProc.payload = JSON.stringify({
+        summary: cleanSummary,
+        date_key: cleanDateKey,
+        all_day: allDay ? true : false,
+        start: String(startTime || "09:00").trim(),
+        end: String(endTime || "10:00").trim(),
+        location: cleanLoc,
+        description: cleanDesc,
+        cal_id: targetCalId,
+        rrule: cleanRrule,
+        add_meet: shouldAddMeet
+      })
+      createCloudEventProc.running = false
       createCloudEventProc.running = true
     } else {
       var genMeet = shouldAddMeet ? Model.generateMeetUrl() : ""
@@ -401,34 +388,28 @@ Panel {
     if (!ev) return
     if (ev.isCloud && root.isCloudConnected) {
       if (scope === "this_only") {
-        deleteCloudEventProc.command = [
-          "python3",
-          root.gcalSyncBin,
-          "delete",
-          ev.id,
-          String(ev.calendarId || "primary")
-        ]
+        deleteCloudEventProc.payload = JSON.stringify({
+          event_id: String(ev.id),
+          cal_id: String(ev.calendarId || "primary")
+        })
+        deleteCloudEventProc.running = false
         deleteCloudEventProc.running = true
       } else if (scope === "following") {
         var masterId = ev.recurringEventId || ev.masterId || ev.id
-        stopCloudRecurProc.command = [
-          "python3",
-          root.gcalSyncBin,
-          "stop-recurrence",
-          masterId,
-          ev.dateKey,
-          String(ev.calendarId || "primary")
-        ]
+        stopCloudRecurProc.payload = JSON.stringify({
+          master_event_id: String(masterId),
+          date_key: String(ev.dateKey),
+          cal_id: String(ev.calendarId || "primary")
+        })
+        stopCloudRecurProc.running = false
         stopCloudRecurProc.running = true
       } else if (scope === "all_series") {
         var mId = ev.recurringEventId || ev.masterId || ev.id
-        deleteCloudEventProc.command = [
-          "python3",
-          root.gcalSyncBin,
-          "delete",
-          mId,
-          String(ev.calendarId || "primary")
-        ]
+        deleteCloudEventProc.payload = JSON.stringify({
+          event_id: String(mId),
+          cal_id: String(ev.calendarId || "primary")
+        })
+        deleteCloudEventProc.running = false
         deleteCloudEventProc.running = true
       }
     } else {
@@ -468,13 +449,11 @@ Panel {
 
   function deleteEvent(eventId, isCloud, calendarId) {
     if (isCloud && root.isCloudConnected) {
-      deleteCloudEventProc.command = [
-        "python3",
-        root.gcalSyncBin,
-        "delete",
-        eventId,
-        String(calendarId || "primary")
-      ]
+      deleteCloudEventProc.payload = JSON.stringify({
+        event_id: String(eventId),
+        cal_id: String(calendarId || "primary")
+      })
+      deleteCloudEventProc.running = false
       deleteCloudEventProc.running = true
     }
 
@@ -574,16 +553,8 @@ Panel {
     }
 
     fetchIcsProc.calendarMeta = currentCal
-    fetchIcsProc.command = [
-      "curl",
-      "-fsSL",
-      "--proto", "=https",
-      "--proto-redir", "=https",
-      "--max-time", "15",
-      "--max-filesize", "5242880",
-      "--",
-      safeUrl
-    ]
+    fetchIcsProc.payload = safeUrl
+    fetchIcsProc.running = false
     fetchIcsProc.running = true
   }
 
@@ -716,12 +687,9 @@ Panel {
   }
 
   function saveEventsCache() {
-    Quickshell.execDetached([
-      "python3",
-      root.gcalSyncBin,
-      "save-ics-cache",
-      JSON.stringify(root.rawCalendarIcs)
-    ])
+    saveIcsCacheProc.payload = JSON.stringify(root.rawCalendarIcs)
+    saveIcsCacheProc.running = false
+    saveIcsCacheProc.running = true
   }
 
   function openGoogleCalendar() {
@@ -827,12 +795,67 @@ Panel {
     }
   }
 
-  // Set Client Credentials Process
+  // Set Client Credentials Process (payload via stdin)
   Process {
     id: setCredsProc
+    command: ["python3", root.gcalSyncBin, "set-credentials"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     onExited: function(exitCode, exitStatus) {
       root.checkAuthStatus()
       root.showClientConfig = false
+    }
+  }
+
+  // Save Calendars Process (payload via stdin)
+  Process {
+    id: saveCalendarsProc
+    command: ["python3", root.gcalSyncBin, "save-calendars"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+  }
+
+  // Save Local Events Process (payload via stdin)
+  Process {
+    id: saveLocalEventsProc
+    command: ["python3", root.gcalSyncBin, "save-local-events"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+  }
+
+  // Save Disabled Calendars Process (payload via stdin)
+  Process {
+    id: saveDisabledCalendarsProc
+    command: ["python3", root.gcalSyncBin, "save-disabled-calendars"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+  }
+
+  // Save ICS Cache Process (payload via stdin)
+  Process {
+    id: saveIcsCacheProc
+    command: ["python3", root.gcalSyncBin, "save-ics-cache"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
     }
   }
 
@@ -864,9 +887,16 @@ Panel {
     }
   }
 
-  // Create Cloud Event Process
+  // Create Cloud Event Process (payload via stdin)
   Process {
     id: createCloudEventProc
+    command: ["python3", root.gcalSyncBin, "create"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     onExited: function(exitCode, exitStatus) {
       Qt.callLater(function() {
         root.syncAllCalendars()
@@ -874,9 +904,16 @@ Panel {
     }
   }
 
-  // Delete Cloud Event Process
+  // Delete Cloud Event Process (payload via stdin)
   Process {
     id: deleteCloudEventProc
+    command: ["python3", root.gcalSyncBin, "delete"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     onExited: function(exitCode, exitStatus) {
       Qt.callLater(function() {
         root.syncAllCalendars()
@@ -884,9 +921,16 @@ Panel {
     }
   }
 
-  // Stop Cloud Recurrence Process
+  // Stop Cloud Recurrence Process (payload via stdin)
   Process {
     id: stopCloudRecurProc
+    command: ["python3", root.gcalSyncBin, "stop-recurrence"]
+    stdinEnabled: true
+    property string payload: ""
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     onExited: function(exitCode, exitStatus) {
       Qt.callLater(function() {
         root.syncAllCalendars()
@@ -894,10 +938,17 @@ Panel {
     }
   }
 
-  // Fetch iCal Feed Process
+  // Fetch iCal Feed Process (URL via stdin, SSRF protected in Python)
   Process {
     id: fetchIcsProc
     property var calendarMeta: null
+    property string payload: ""
+    command: ["python3", root.gcalSyncBin, "fetch-ical"]
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     onExited: function(exitCode, exitStatus) {
       Qt.callLater(function() {
         root.syncIndex++
