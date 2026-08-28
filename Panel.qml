@@ -256,6 +256,15 @@ Panel {
     authStatusProc.running = true
   }
 
+  function safePayload(str, limit) {
+    var s = String(str || "")
+    var maxLen = limit || 5242880
+    if (s.length > maxLen) {
+      return s.substring(0, maxLen)
+    }
+    return s
+  }
+
   function startGoogleAuth() {
     root.isWaitingAuth = true
     startAuthProc.running = false
@@ -270,22 +279,25 @@ Panel {
   }
 
   function setCredentials(cId, cSecret) {
-    setCredsProc.payload = JSON.stringify({
+    setCredsProc.stdinEnabled = true
+    setCredsProc.payload = safePayload(JSON.stringify({
       client_id: String(cId || "").trim(),
       client_secret: String(cSecret || "").trim()
-    })
+    }), 65536)
     setCredsProc.running = false
     setCredsProc.running = true
   }
 
   function saveCalendars() {
-    saveCalendarsProc.payload = JSON.stringify(root.calendars)
+    saveCalendarsProc.stdinEnabled = true
+    saveCalendarsProc.payload = safePayload(JSON.stringify(root.calendars))
     saveCalendarsProc.running = false
     saveCalendarsProc.running = true
   }
 
   function saveLocalEvents() {
-    saveLocalEventsProc.payload = JSON.stringify(root.localEvents)
+    saveLocalEventsProc.stdinEnabled = true
+    saveLocalEventsProc.payload = safePayload(JSON.stringify(root.localEvents))
     saveLocalEventsProc.running = false
     saveLocalEventsProc.running = true
   }
@@ -316,7 +328,8 @@ Panel {
   }
 
   function saveDisabledCalendars() {
-    saveDisabledCalendarsProc.payload = JSON.stringify(root.disabledCalendarIds)
+    saveDisabledCalendarsProc.stdinEnabled = true
+    saveDisabledCalendarsProc.payload = safePayload(JSON.stringify(root.disabledCalendarIds))
     saveDisabledCalendarsProc.running = false
     saveDisabledCalendarsProc.running = true
   }
@@ -333,7 +346,8 @@ Panel {
     var shouldAddMeet = !!addMeet
 
     if (root.isCloudConnected) {
-      createCloudEventProc.payload = JSON.stringify({
+      createCloudEventProc.stdinEnabled = true
+      createCloudEventProc.payload = safePayload(JSON.stringify({
         summary: cleanSummary,
         date_key: cleanDateKey,
         all_day: allDay ? true : false,
@@ -344,7 +358,7 @@ Panel {
         cal_id: targetCalId,
         rrule: cleanRrule,
         add_meet: shouldAddMeet
-      })
+      }))
       createCloudEventProc.running = false
       createCloudEventProc.running = true
     } else {
@@ -388,27 +402,30 @@ Panel {
     if (!ev) return
     if (ev.isCloud && root.isCloudConnected) {
       if (scope === "this_only") {
-        deleteCloudEventProc.payload = JSON.stringify({
+        deleteCloudEventProc.stdinEnabled = true
+        deleteCloudEventProc.payload = safePayload(JSON.stringify({
           event_id: String(ev.id),
           cal_id: String(ev.calendarId || "primary")
-        })
+        }), 65536)
         deleteCloudEventProc.running = false
         deleteCloudEventProc.running = true
       } else if (scope === "following") {
         var masterId = ev.recurringEventId || ev.masterId || ev.id
-        stopCloudRecurProc.payload = JSON.stringify({
+        stopCloudRecurProc.stdinEnabled = true
+        stopCloudRecurProc.payload = safePayload(JSON.stringify({
           master_event_id: String(masterId),
           date_key: String(ev.dateKey),
           cal_id: String(ev.calendarId || "primary")
-        })
+        }), 65536)
         stopCloudRecurProc.running = false
         stopCloudRecurProc.running = true
       } else if (scope === "all_series") {
         var mId = ev.recurringEventId || ev.masterId || ev.id
-        deleteCloudEventProc.payload = JSON.stringify({
+        deleteCloudEventProc.stdinEnabled = true
+        deleteCloudEventProc.payload = safePayload(JSON.stringify({
           event_id: String(mId),
           cal_id: String(ev.calendarId || "primary")
-        })
+        }), 65536)
         deleteCloudEventProc.running = false
         deleteCloudEventProc.running = true
       }
@@ -449,10 +466,11 @@ Panel {
 
   function deleteEvent(eventId, isCloud, calendarId) {
     if (isCloud && root.isCloudConnected) {
-      deleteCloudEventProc.payload = JSON.stringify({
+      deleteCloudEventProc.stdinEnabled = true
+      deleteCloudEventProc.payload = safePayload(JSON.stringify({
         event_id: String(eventId),
         cal_id: String(calendarId || "primary")
-      })
+      }), 65536)
       deleteCloudEventProc.running = false
       deleteCloudEventProc.running = true
     }
@@ -553,7 +571,8 @@ Panel {
     }
 
     fetchIcsProc.calendarMeta = currentCal
-    fetchIcsProc.payload = safeUrl
+    fetchIcsProc.stdinEnabled = true
+    fetchIcsProc.payload = safePayload(safeUrl, 4096)
     fetchIcsProc.running = false
     fetchIcsProc.running = true
   }
@@ -687,7 +706,8 @@ Panel {
   }
 
   function saveEventsCache() {
-    saveIcsCacheProc.payload = JSON.stringify(root.rawCalendarIcs)
+    saveIcsCacheProc.stdinEnabled = true
+    saveIcsCacheProc.payload = safePayload(JSON.stringify(root.rawCalendarIcs))
     saveIcsCacheProc.running = false
     saveIcsCacheProc.running = true
   }
@@ -804,8 +824,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
     }
     onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
       root.checkAuthStatus()
       root.showClientConfig = false
     }
@@ -820,6 +842,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
     }
   }
 
@@ -832,6 +858,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
     }
   }
 
@@ -844,6 +874,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
     }
   }
 
@@ -856,6 +890,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
     }
   }
 
@@ -896,8 +934,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
     }
     onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
       Qt.callLater(function() {
         root.syncAllCalendars()
       })
@@ -913,8 +953,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
     }
     onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
       Qt.callLater(function() {
         root.syncAllCalendars()
       })
@@ -930,8 +972,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
     }
     onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
       Qt.callLater(function() {
         root.syncAllCalendars()
       })
@@ -948,8 +992,10 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
     }
     onExited: function(exitCode, exitStatus) {
+      stdinEnabled = true
       Qt.callLater(function() {
         root.syncIndex++
         root.syncNextCalendar()
