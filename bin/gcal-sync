@@ -72,80 +72,153 @@ def read_stdin_payload(max_bytes=MAX_FILE_BYTES):
         print(f"Error reading stdin payload: {e}", file=sys.stderr)
         return ""
 
-def ensure_private_dir(dir_path):
-    os.makedirs(dir_path, mode=0o700, exist_ok=True)
+MAX_CALENDARS = 50
+MAX_EVENTS_PER_CAL = 200
+MAX_TOTAL_CLOUD_EVENTS = 500
+
+def open_verified_directory_chain(dir_path, create=False, mode=0o700):
+    norm_path = os.path.abspath(dir_path)
+    parts = [p for p in norm_path.split("/") if p]
+
+    dfd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    curr_uid = os.getuid()
+
     try:
-        os.chmod(dir_path, 0o700)
-    except OSError:
-        pass
+        st = os.fstat(dfd)
+        if st.st_uid != 0 and st.st_uid != curr_uid:
+            raise PermissionError(f"Root directory / owned by unexpected UID {st.st_uid}")
+
+        for part in parts:
+            next_dfd = -1
+            try:
+                next_dfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+            except FileNotFoundError:
+                if create:
+                    try:
+                        os.mkdir(part, mode, dir_fd=dfd)
+                    except FileExistsError:
+                        pass
+                    next_dfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+                else:
+                    raise
+
+            st = os.fstat(next_dfd)
+            if not stat.S_ISDIR(st.st_mode):
+                os.close(next_dfd)
+                raise ValueError(f"Path component is not a directory: {part}")
+
+            if st.st_uid != curr_uid and st.st_uid != 0:
+                os.close(next_dfd)
+                raise PermissionError(f"Directory component {part} owned by untrusted UID {st.st_uid}")
+
+            if st.st_uid == curr_uid:
+                if (st.st_mode & 0o022) != 0:
+                    try:
+                        os.fchmod(next_dfd, mode)
+                    except OSError:
+                        pass
+                    st = os.fstat(next_dfd)
+                    if (st.st_mode & 0o022) != 0:
+                        os.close(next_dfd)
+                        raise PermissionError(f"Directory component {part} has permissive mode {oct(st.st_mode)}")
+            else:
+                if (st.st_mode & 0o002) != 0 and not (st.st_mode & stat.S_ISVTX):
+                    os.close(next_dfd)
+                    raise PermissionError(f"Root-owned component {part} is world-writable")
+
+            os.close(dfd)
+            dfd = next_dfd
+
+        return dfd
+    except Exception:
+        os.close(dfd)
+        raise
 
 def atomic_write_json(file_path, data, mode=0o600):
-    target_dir = os.path.dirname(file_path)
-    ensure_private_dir(target_dir)
+    dir_name = os.path.dirname(os.path.abspath(file_path))
+    base_name = os.path.basename(file_path)
 
-    # Reject symlinks and non-regular files
-    if os.path.islink(file_path):
-        raise ValueError(f"Refusing to write to symlink: {file_path}")
-    if os.path.exists(file_path) and not os.path.isfile(file_path):
-        raise ValueError(f"Target is not a regular file: {file_path}")
-
-    tmp_file = f"{file_path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    parent_fd = -1
+    tmp_fd = -1
+    tmp_name = None
     try:
-        fd = os.open(tmp_file, flags, mode)
-        with open(fd, "w", encoding="utf-8") as f:
-            if isinstance(data, str):
-                f.write(data)
-            else:
-                json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(fd)
+        parent_fd = open_verified_directory_chain(dir_name, create=True, mode=0o700)
 
-        if os.path.islink(file_path):
-            raise ValueError(f"Target changed to symlink: {file_path}")
-
-        os.replace(tmp_file, file_path)
+        # Reject if target exists in parent_fd and is a symlink or non-regular file
         try:
-            os.chmod(file_path, mode)
-        except OSError:
+            target_st = os.stat(base_name, dir_fd=parent_fd, follow_symlinks=False)
+            if stat.S_ISLNK(target_st.st_mode):
+                raise ValueError(f"Target is a symlink: {base_name}")
+            if not stat.S_ISREG(target_st.st_mode):
+                raise ValueError(f"Target is not a regular file: {base_name}")
+        except FileNotFoundError:
             pass
+
+        # Create temporary file directly in the held parent descriptor
+        tmp_name = f".{base_name}.tmp.{os.getpid()}.{secrets.token_hex(8)}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        tmp_fd = os.open(tmp_name, flags, mode, dir_fd=parent_fd)
+
+        st = os.fstat(tmp_fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("Temporary descriptor is not a regular file")
+        if st.st_uid != os.getuid():
+            raise PermissionError(f"Temporary descriptor owned by unexpected UID {st.st_uid}")
+
+        os.fchmod(tmp_fd, mode)
+
+        payload = data if isinstance(data, str) else json.dumps(data, indent=2)
+        payload_bytes = payload.encode("utf-8")
+        os.write(tmp_fd, payload_bytes)
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
+        tmp_fd = -1
+
+        # Same-object atomic publication strictly relative to the held parent descriptor
+        os.rename(tmp_name, base_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        tmp_name = None
     finally:
-        if os.path.exists(tmp_file):
+        if tmp_fd >= 0:
             try:
-                os.remove(tmp_file)
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        if tmp_name and parent_fd >= 0:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
             except OSError:
                 pass
 
 def safe_read_json(file_path, default=None, max_bytes=MAX_FILE_BYTES):
-    if not os.path.exists(file_path):
-        return default
+    dir_name = os.path.dirname(os.path.abspath(file_path))
+    base_name = os.path.basename(file_path)
 
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_NONBLOCK"):
-        flags |= os.O_NONBLOCK
-
+    parent_fd = -1
     fd = -1
     try:
-        # Open once with O_NOFOLLOW | O_NONBLOCK to eliminate TOCTOU and FIFO blocking
-        fd = os.open(file_path, flags)
-    except OSError:
-        return default
+        parent_fd = open_verified_directory_chain(dir_name, create=False)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        fd = os.open(base_name, flags, dir_fd=parent_fd)
 
-    try:
         st = os.fstat(fd)
-        # Verify descriptor is a regular file
+        # 1. Verify descriptor is a regular file
         if not stat.S_ISREG(st.st_mode):
             return default
-
-        # If file size is already reported larger than ceiling, reject immediately
+        # 2. Verify descriptor owner is current user
+        if st.st_uid != os.getuid():
+            return default
+        # 3. Verify descriptor mode: private (no group or others access)
+        if (st.st_mode & 0o077) != 0:
+            return default
+        # 4. Check size ceiling
         if st.st_size > max_bytes:
             return default
 
-        # Read at most max_bytes + 1 bytes from that same descriptor
         chunks = []
         bytes_read = 0
         while bytes_read <= max_bytes:
@@ -156,7 +229,6 @@ def safe_read_json(file_path, default=None, max_bytes=MAX_FILE_BYTES):
             bytes_read += len(chunk)
 
         if bytes_read > max_bytes:
-            # File exceeded byte ceiling
             return default
 
         raw_data = b"".join(chunks)
@@ -172,6 +244,106 @@ def safe_read_json(file_path, default=None, max_bytes=MAX_FILE_BYTES):
                 os.close(fd)
             except OSError:
                 pass
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+def read_bounded_http_response(resp, max_bytes=65536, wall_clock_timeout=15.0):
+    cl = resp.headers.get("Content-Length")
+    if cl:
+        try:
+            if int(cl) > max_bytes:
+                raise ValueError(f"Content-Length {cl} exceeds ceiling {max_bytes} bytes")
+        except ValueError as e:
+            if "exceeds ceiling" in str(e):
+                raise
+
+    start_time = time.monotonic()
+    chunks = []
+    total_read = 0
+    while total_read <= max_bytes:
+        if (time.monotonic() - start_time) > wall_clock_timeout:
+            raise TimeoutError("Wall-clock timeout reading HTTP response")
+        chunk = resp.read(min(16384, max_bytes + 1 - total_read))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total_read += len(chunk)
+
+    if total_read > max_bytes:
+        raise ValueError(f"HTTP response exceeded maximum byte ceiling of {max_bytes} bytes")
+
+    raw_bytes = b"".join(chunks)
+    return raw_bytes.decode("utf-8", errors="replace")
+
+def sanitize_calendar_item(cal):
+    if not isinstance(cal, dict):
+        return None
+    cid = str(cal.get("id", "")).strip()[:256]
+    if not cid:
+        return None
+    return {
+        "id": cid,
+        "summary": str(cal.get("summary", "Calendar")).strip()[:128],
+        "backgroundColor": str(cal.get("backgroundColor", "#4285F4")).strip()[:32],
+        "primary": bool(cal.get("primary", False)),
+        "selected": bool(cal.get("selected", True)),
+        "accessRole": str(cal.get("accessRole", "")).strip()[:32]
+    }
+
+def sanitize_event_item(ev, cal_name="", cal_color="", cal_id=""):
+    if not isinstance(ev, dict):
+        return None
+    eid = str(ev.get("id", "")).strip()[:256]
+    if not eid:
+        return None
+
+    start_raw = ev.get("start", {})
+    end_raw = ev.get("end", {})
+    start = {}
+    end = {}
+    if isinstance(start_raw, dict):
+        if "dateTime" in start_raw:
+            start["dateTime"] = str(start_raw["dateTime"])[:64]
+        if "date" in start_raw:
+            start["date"] = str(start_raw["date"])[:32]
+    if isinstance(end_raw, dict):
+        if "dateTime" in end_raw:
+            end["dateTime"] = str(end_raw["dateTime"])[:64]
+        if "date" in end_raw:
+            end["date"] = str(end_raw["date"])[:32]
+
+    meet_url = ""
+    if ev.get("hangoutLink"):
+        meet_url = str(ev["hangoutLink"])[:512]
+    elif isinstance(ev.get("conferenceData"), dict):
+        for ep in ev["conferenceData"].get("entryPoints", []):
+            if isinstance(ep, dict) and ep.get("uri"):
+                meet_url = str(ep["uri"])[:512]
+                break
+
+    recurrence = []
+    if isinstance(ev.get("recurrence"), list):
+        for r in ev["recurrence"][:5]:
+            recurrence.append(str(r)[:256])
+
+    return {
+        "id": eid,
+        "summary": str(ev.get("summary", "Untitled")).strip()[:256],
+        "description": str(ev.get("description", "")).strip()[:1024],
+        "location": str(ev.get("location", "")).strip()[:512],
+        "start": start,
+        "end": end,
+        "status": str(ev.get("status", "confirmed"))[:32],
+        "recurringEventId": str(ev.get("recurringEventId", ""))[:256] if ev.get("recurringEventId") else None,
+        "hangoutLink": meet_url,
+        "recurrence": recurrence,
+        "calendarId": str(cal_id or ev.get("calendarId", "primary"))[:256],
+        "calendarName": str(cal_name or ev.get("calendarName", "Calendar"))[:128],
+        "calendarColor": str(cal_color or ev.get("calendarColor", "#4285F4"))[:32]
+    }
 
 def is_public_ip(ip_str):
     try:
@@ -394,9 +566,10 @@ def get_valid_access_token():
 
         req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data, method="POST")
         with urllib.request.urlopen(req, timeout=15) as resp:
-            token_resp = json.loads(resp.read().decode("utf-8"))
-            auth["access_token"] = token_resp["access_token"]
-            auth["expiry_timestamp"] = now + token_resp.get("expires_in", 3600)
+            body = read_bounded_http_response(resp, max_bytes=64 * 1024)
+            token_resp = json.loads(body)
+            auth["access_token"] = str(token_resp.get("access_token", ""))[:1024]
+            auth["expiry_timestamp"] = now + min(int(token_resp.get("expires_in", 3600)), 86400)
             save_auth(auth)
             return auth["access_token"]
     except Exception as e:
@@ -426,61 +599,59 @@ def start_oauth_flow():
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
 
-            received_state = query.get("state", [None])[0]
-            if not received_state or not secrets.compare_digest(received_state, expected_state):
-                auth_code_holder["error"] = "Invalid or missing OAuth state"
+            state = query.get("state", [None])[0]
+            code = query.get("code", [None])[0]
+            error = query.get("error", [None])[0]
+
+            if not state or not secrets.compare_digest(state, expected_state):
                 self.send_response(400)
-                self.send_header("Content-type", "text/html; charset=utf-8")
+                self.send_header("Content-type", "text/html")
                 self.end_headers()
-                self.wfile.write(b"<h1>Authentication Failed</h1><p>State parameter validation failed.</p>")
-                threading.Thread(target=lambda: server_holder["server"].shutdown()).start()
+                self.wfile.write(b"<h1>Authentication Failed</h1><p>Invalid or expired state parameter. CSRF protection blocked this request.</p>")
+                auth_code_holder["error"] = "Invalid state"
                 return
 
-            if "code" in query:
-                auth_code_holder["code"] = query["code"][0]
-                self.send_response(200)
-                self.send_header("Content-type", "text/html; charset=utf-8")
-                self.end_headers()
-                html = """
-                <!DOCTYPE html>
-                <html>
-                <head><title>Google Calendar Connected</title></head>
-                <body style="font-family:system-ui,sans-serif;text-align:center;padding:60px;background:#181825;color:#cdd6f4;">
-                    <div style="background:#313244;padding:40px;border-radius:16px;display:inline-block;box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-                        <h1 style="color:#a6e3a1;margin-bottom:10px;">&#10004; Google Calendar Connected!</h1>
-                        <p style="font-size:18px;color:#bac2de;">All Google Calendars in your account are now linked.</p>
-                        <p style="font-size:14px;color:#6c7086;margin-top:20px;">You can close this tab and return to Omarchy Clock.</p>
-                    </div>
-                </body>
-                </html>
-                """
-                self.wfile.write(html.encode("utf-8"))
-            elif "error" in query:
-                auth_code_holder["error"] = query["error"][0]
+            if error:
                 self.send_response(400)
-                self.send_header("Content-type", "text/html; charset=utf-8")
+                self.send_header("Content-type", "text/html")
                 self.end_headers()
-                self.wfile.write(b"<h1>Authentication Failed</h1><p>Authorization error from provider.</p>")
+                self.wfile.write(f"<h1>Authentication Error</h1><p>{error}</p>".encode("utf-8"))
+                auth_code_holder["error"] = error
+                return
 
-            threading.Thread(target=lambda: server_holder["server"].shutdown()).start()
+            if not code:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<h1>Authentication Failed</h1><p>Missing authorization code.</p>")
+                auth_code_holder["error"] = "Missing code"
+                return
 
-    port = 8765
-    httpd = None
-    while port < 8790:
-        try:
-            httpd = socketserver.TCPServer(("127.0.0.1", port), OAuthCallbackHandler)
-            server_holder["server"] = httpd
-            break
-        except OSError:
-            port += 1
+            auth_code_holder["code"] = code
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h1>Authentication Successful!</h1><p>You can close this tab and return to Omarchy Clock.</p>")
 
-    if not httpd:
-        print("Error: Could not bind loopback port for OAuth callback", file=sys.stderr)
+            def shutdown():
+                if server_holder["server"]:
+                    server_holder["server"].shutdown()
+            threading.Thread(target=shutdown).start()
+
+    class StoppableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    try:
+        httpd = StoppableTCPServer(("127.0.0.1", 0), OAuthCallbackHandler)
+    except Exception as e:
+        print(f"Error binding loopback server: {e}", file=sys.stderr)
         return False
 
+    server_holder["server"] = httpd
+    port = httpd.server_address[1]
     redirect_uri = f"http://127.0.0.1:{port}"
 
-    params = {
+    params = urllib.parse.urlencode({
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
@@ -490,31 +661,30 @@ def start_oauth_flow():
         "state": expected_state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256"
-    }
-
-    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
-    print(f"AUTH_URL:{auth_url}", flush=True)
+    })
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
 
     try:
         subprocess.Popen(["xdg-open", "--", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"Failed to open browser with xdg-open: {e}", file=sys.stderr)
+    except Exception:
+        print(f"AUTH_URL:{auth_url}", flush=True)
 
-    print("Waiting for Google authorization...", flush=True)
-    httpd.timeout = 1.0
-    start_time = time.time()
-    timeout_seconds = 120
+    print(f"AUTH_URL:{auth_url}", flush=True)
 
-    while time.time() - start_time < timeout_seconds:
-        if auth_code_holder["code"] is not None or auth_code_holder["error"] is not None:
-            break
-        httpd.handle_request()
+    server_thread = threading.Thread(target=httpd.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
 
-    httpd.server_close()
+    server_thread.join(timeout=120)
+
+    try:
+        httpd.server_close()
+    except Exception:
+        pass
 
     if not auth_code_holder["code"]:
-        err = auth_code_holder.get("error") or "Timed out waiting for authorization"
-        print(f"Authorization failed: {err}", file=sys.stderr, flush=True)
+        err = auth_code_holder.get("error") or "Timed out waiting for browser callback"
+        print(f"Authentication failed: {err}", file=sys.stderr)
         return False
 
     try:
@@ -529,12 +699,13 @@ def start_oauth_flow():
 
         req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data, method="POST")
         with urllib.request.urlopen(req, timeout=15) as resp:
-            token_resp = json.loads(resp.read().decode("utf-8"))
+            body = read_bounded_http_response(resp, max_bytes=64 * 1024)
+            token_resp = json.loads(body)
             now = datetime.now(timezone.utc).timestamp()
             auth_data = {
-                "access_token": token_resp["access_token"],
-                "refresh_token": token_resp.get("refresh_token"),
-                "expiry_timestamp": now + token_resp.get("expires_in", 3600),
+                "access_token": str(token_resp.get("access_token", ""))[:1024],
+                "refresh_token": str(token_resp.get("refresh_token", ""))[:1024] if token_resp.get("refresh_token") else None,
+                "expiry_timestamp": now + min(int(token_resp.get("expires_in", 3600)), 86400),
                 "created_at": datetime.now().isoformat()
             }
             save_auth(auth_data)
@@ -553,8 +724,15 @@ def list_cloud_calendars():
     req = urllib.request.Request("https://www.googleapis.com/calendar/v3/users/me/calendarList", headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            items = data.get("items", [])
+            body = read_bounded_http_response(resp, max_bytes=512 * 1024)
+            data = json.loads(body)
+            raw_items = data.get("items", [])
+            items = []
+            if isinstance(raw_items, list):
+                for item in raw_items[:MAX_CALENDARS]:
+                    sanitized = sanitize_calendar_item(item)
+                    if sanitized:
+                        items.append(sanitized)
             atomic_write_json(CLOUD_CALS_FILE, items, mode=0o600)
             return items
     except Exception as e:
@@ -576,20 +754,23 @@ def list_cloud_events(days_back=30, days_forward=90):
     time_max = (now + timedelta(days=days_forward)).isoformat()
 
     all_events = []
-    for cal in cals:
+    for cal in cals[:MAX_CALENDARS]:
         if cal.get("selected") is False:
             continue
-        cal_id = cal.get("id")
+        if len(all_events) >= MAX_TOTAL_CLOUD_EVENTS:
+            break
+
+        cal_id = cal.get("id", "primary")
         cal_name = cal.get("summary", "Calendar")
         cal_color = cal.get("backgroundColor", "#4285F4")
-        encoded_id = urllib.parse.quote(cal_id, safe="")
+        encoded_id = urllib.parse.quote(str(cal_id), safe="")
 
         params = urllib.parse.urlencode({
             "timeMin": time_min,
             "timeMax": time_max,
             "singleEvents": "true",
             "orderBy": "startTime",
-            "maxResults": 250
+            "maxResults": min(250, MAX_EVENTS_PER_CAL)
         })
 
         url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events?{params}"
@@ -597,13 +778,16 @@ def list_cloud_events(days_back=30, days_forward=90):
 
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                body = read_bounded_http_response(resp, max_bytes=512 * 1024)
+                data = json.loads(body)
                 items = data.get("items", [])
-                for ev in items:
-                    ev["calendarName"] = cal_name
-                    ev["calendarColor"] = cal_color
-                    ev["calendarId"] = cal_id
-                    all_events.append(ev)
+                if isinstance(items, list):
+                    for ev in items[:MAX_EVENTS_PER_CAL]:
+                        sanitized = sanitize_event_item(ev, cal_name, cal_color, cal_id)
+                        if sanitized:
+                            all_events.append(sanitized)
+                            if len(all_events) >= MAX_TOTAL_CLOUD_EVENTS:
+                                break
         except Exception as e:
             # Ignore 404 or inaccessible secondary calendars
             pass
@@ -690,14 +874,16 @@ def create_cloud_event(summary, date_key, all_day=False, start_time="09:00", end
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            created = json.loads(resp.read().decode("utf-8"))
-            print(f"EVENT_CREATED:{created.get('id')}", flush=True)
+            body = read_bounded_http_response(resp, max_bytes=256 * 1024)
+            created = json.loads(body)
+            sanitized = sanitize_event_item(created, cal_id=calendar_id)
+            print(f"EVENT_CREATED:{sanitized.get('id')}", flush=True)
             list_cloud_events()
-            return created
+            return sanitized
     except urllib.error.HTTPError as e:
         body = ""
         try:
-            body = e.read().decode("utf-8")
+            body = read_bounded_http_response(e, max_bytes=16 * 1024)
         except Exception:
             pass
         print(f"Error creating Google Calendar event: {e} - {body}", file=sys.stderr)
@@ -721,6 +907,7 @@ def delete_cloud_event(event_id, calendar_id="primary"):
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
+            read_bounded_http_response(resp, max_bytes=64 * 1024)
             print("EVENT_DELETED", flush=True)
             list_cloud_events()
             return True
@@ -739,7 +926,8 @@ def stop_cloud_recurrence(master_event_id, date_key, calendar_id="primary"):
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            master = json.loads(resp.read().decode("utf-8"))
+            body = read_bounded_http_response(resp, max_bytes=256 * 1024)
+            master = json.loads(body)
     except Exception as e:
         print(f"Error fetching master event: {e}", file=sys.stderr)
         return False
@@ -767,6 +955,7 @@ def stop_cloud_recurrence(master_event_id, date_key, calendar_id="primary"):
             method="PUT"
         )
         with urllib.request.urlopen(put_req, timeout=15) as resp:
+            read_bounded_http_response(resp, max_bytes=256 * 1024)
             print("RECURRENCE_STOPPED", flush=True)
             list_cloud_events()
             return True
@@ -846,7 +1035,8 @@ def main():
             sys.exit(1)
         try:
             parsed = json.loads(raw)
-            atomic_write_json(CALENDARS_FILE, parsed, mode=0o600)
+            clean_cals = parsed[:MAX_CALENDARS] if isinstance(parsed, list) else []
+            atomic_write_json(CALENDARS_FILE, clean_cals, mode=0o600)
             print("CALENDARS_SAVED")
         except Exception as e:
             print(f"Error saving calendars: {e}", file=sys.stderr)
@@ -859,7 +1049,8 @@ def main():
             sys.exit(1)
         try:
             parsed = json.loads(raw)
-            atomic_write_json(LOCAL_EVENTS_FILE, parsed, mode=0o600)
+            clean_evs = parsed[:500] if isinstance(parsed, list) else []
+            atomic_write_json(LOCAL_EVENTS_FILE, clean_evs, mode=0o600)
             print("LOCAL_EVENTS_SAVED")
         except Exception as e:
             print(f"Error saving local events: {e}", file=sys.stderr)
@@ -872,7 +1063,8 @@ def main():
             sys.exit(1)
         try:
             parsed = json.loads(raw)
-            atomic_write_json(DISABLED_CALS_FILE, parsed, mode=0o600)
+            clean_dis = [str(x)[:256] for x in parsed[:MAX_CALENDARS]] if isinstance(parsed, list) else []
+            atomic_write_json(DISABLED_CALS_FILE, clean_dis, mode=0o600)
             print("DISABLED_CALENDARS_SAVED")
         except Exception as e:
             print(f"Error saving disabled calendars: {e}", file=sys.stderr)
@@ -885,7 +1077,12 @@ def main():
             sys.exit(1)
         try:
             parsed = json.loads(raw)
-            atomic_write_json(ICS_CACHE_FILE, parsed, mode=0o600)
+            clean_cache = {}
+            if isinstance(parsed, dict):
+                for k, v in list(parsed.items())[:MAX_CALENDARS]:
+                    if isinstance(v, str) and len(v) <= MAX_FILE_BYTES:
+                        clean_cache[str(k)[:256]] = v
+            atomic_write_json(ICS_CACHE_FILE, clean_cache, mode=0o600)
             print("ICS_CACHE_SAVED")
         except Exception as e:
             print(f"Error saving ics cache: {e}", file=sys.stderr)
@@ -910,14 +1107,63 @@ def main():
         cloud_cals = safe_read_json(CLOUD_CALS_FILE, default=[])
         api_evs = safe_read_json(API_CACHE_FILE, default=[])
         ics_cache = safe_read_json(ICS_CACHE_FILE, default={})
-        print(json.dumps({
-            "calendars": cals if isinstance(cals, list) else [],
-            "localEvents": local_evs if isinstance(local_evs, list) else [],
-            "disabledCalendars": disabled_cals if isinstance(disabled_cals, list) else [],
-            "cloudCalendars": cloud_cals if isinstance(cloud_cals, list) else [],
-            "cloudApiEvents": api_evs if isinstance(api_evs, list) else [],
-            "rawCalendarIcs": ics_cache if isinstance(ics_cache, dict) else {}
-        }))
+
+        cals_clean = []
+        if isinstance(cals, list):
+            for c in cals[:MAX_CALENDARS]:
+                if isinstance(c, dict):
+                    cals_clean.append({
+                        "id": str(c.get("id", ""))[:256],
+                        "name": str(c.get("name", "Calendar"))[:128],
+                        "url": str(c.get("url", ""))[:2048],
+                        "color": str(c.get("color", "#4285F4"))[:32],
+                        "enabled": bool(c.get("enabled", True))
+                    })
+
+        local_evs_clean = []
+        if isinstance(local_evs, list):
+            for ev in local_evs[:500]:
+                if isinstance(ev, dict):
+                    local_evs_clean.append({
+                        "id": str(ev.get("id", ""))[:256],
+                        "summary": str(ev.get("summary", "Untitled"))[:256],
+                        "dateKey": str(ev.get("dateKey", ""))[:32],
+                        "allDay": bool(ev.get("allDay", False)),
+                        "startTime": str(ev.get("startTime", "09:00"))[:16],
+                        "endTime": str(ev.get("endTime", "10:00"))[:16],
+                        "calendarColor": str(ev.get("calendarColor", "#4285F4"))[:32],
+                        "calendarName": str(ev.get("calendarName", "My Events"))[:128],
+                        "location": str(ev.get("location", ""))[:512],
+                        "description": str(ev.get("description", ""))[:1024],
+                        "meetUrl": str(ev.get("meetUrl", ""))[:512],
+                        "isLocal": True,
+                        "isCloud": False
+                    })
+
+        disabled_cals_clean = [str(x)[:256] for x in disabled_cals[:MAX_CALENDARS]] if isinstance(disabled_cals, list) else []
+        cloud_cals_clean = [sanitize_calendar_item(c) for c in cloud_cals[:MAX_CALENDARS] if sanitize_calendar_item(c)] if isinstance(cloud_cals, list) else []
+        api_evs_clean = [sanitize_event_item(e) for e in api_evs[:MAX_TOTAL_CLOUD_EVENTS] if sanitize_event_item(e)] if isinstance(api_evs, list) else []
+
+        ics_cache_clean = {}
+        if isinstance(ics_cache, dict):
+            for k, v in list(ics_cache.items())[:MAX_CALENDARS]:
+                if isinstance(v, str) and len(v) <= MAX_FILE_BYTES:
+                    ics_cache_clean[str(k)[:256]] = v
+
+        output_payload = json.dumps({
+            "calendars": cals_clean,
+            "localEvents": local_evs_clean,
+            "disabledCalendars": disabled_cals_clean,
+            "cloudCalendars": cloud_cals_clean,
+            "cloudApiEvents": api_evs_clean,
+            "rawCalendarIcs": ics_cache_clean
+        })
+
+        if len(output_payload) > MAX_FILE_BYTES:
+            print(f"Error: Aggregated payload exceeds {MAX_FILE_BYTES} bytes ceiling", file=sys.stderr)
+            sys.exit(1)
+
+        print(output_payload)
 
     elif cmd == "list-calendars":
         cals = list_cloud_calendars()
@@ -928,12 +1174,17 @@ def main():
         sys.exit(0 if success else 1)
 
     elif cmd == "logout":
-        if os.path.exists(AUTH_FILE):
-            os.remove(AUTH_FILE)
-        if os.path.exists(API_CACHE_FILE):
-            os.remove(API_CACHE_FILE)
-        if os.path.exists(CLOUD_CALS_FILE):
-            os.remove(CLOUD_CALS_FILE)
+        for file_path in (AUTH_FILE, API_CACHE_FILE, CLOUD_CALS_FILE):
+            try:
+                dir_name = os.path.dirname(os.path.abspath(file_path))
+                base_name = os.path.basename(file_path)
+                dfd = open_verified_directory_chain(dir_name, create=False)
+                try:
+                    os.unlink(base_name, dir_fd=dfd)
+                finally:
+                    os.close(dfd)
+            except Exception:
+                pass
         print("LOGGED_OUT")
 
     elif cmd == "list-cloud":
