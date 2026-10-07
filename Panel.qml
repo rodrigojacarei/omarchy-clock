@@ -1278,15 +1278,6 @@ Panel {
                   }
                 }
               }
-
-              // Close Panel Button
-              PanelActionButton {
-                iconText: "󰅖"
-                tooltipText: "Close Calendar (Esc)"
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-                onClicked: root.close()
-              }
             }
           }
 
