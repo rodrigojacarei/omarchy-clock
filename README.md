@@ -175,6 +175,55 @@ omarchy plugin enable omarchy-clock --section center
 
 ---
 
+## 🗑️ Removal / Uninstallation
+
+### Option 1: Using Omarchy CLI (Recommended)
+
+To remove the plugin using the Omarchy CLI:
+
+```bash
+omarchy plugin remove omarchy-clock
+```
+
+To remove non-interactively without confirmation prompts:
+
+```bash
+omarchy plugin remove omarchy-clock --yes
+```
+
+### Option 2: Manual Removal
+
+To manually uninstall and remove all local plugin files and configuration:
+
+```bash
+# 1. Disable the plugin in Omarchy shell
+omarchy plugin disable omarchy-clock
+
+# 2. Remove CLI helper and desktop application launcher
+rm -f ~/.local/bin/omarchy-clock
+rm -f ~/.local/share/applications/omarchy-clock.desktop
+
+# 3. Remove the plugin directory
+rm -rf ~/.config/omarchy/plugins/omarchy-clock
+
+# 4. (Optional) Remove plugin configuration and cached calendar data
+rm -rf ~/.config/omarchy-clock
+rm -rf ~/.cache/omarchy/clock
+
+# 5. Reload Omarchy shell
+omarchy-restart-shell
+```
+
+---
+
+## 📋 Dependencies
+
+- **Omarchy Shell** / **Quickshell** (Built into Omarchy Linux)
+- **Python 3** (Standard library only — zero pip dependencies required)
+- **xdg-open** (Included in desktop environments, used to open Google Meet video calls and browser authorization)
+
+---
+
 ## ⌨️ Keyboard Shortcuts & Hyprland Keybindings
 
 ### In-Panel Keyboard Shortcuts
