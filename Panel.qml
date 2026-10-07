@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "rodrigo.clock"
-  ipcTarget: "rodrigo.clock"
+  moduleName: "omarchy-clock"
+  ipcTarget: "omarchy-clock"
   manageIpc: false
 
   property var anchorItem: null
@@ -49,6 +49,13 @@ Panel {
 
   // ---- Google Calendar, Local & Cloud Events Data
   property bool showSettings: false
+  onShowSettingsChanged: {
+    if (!showSettings) {
+      Qt.callLater(function() {
+        if (keyCatcher) keyCatcher.forceActiveFocus()
+      })
+    }
+  }
   property bool showAddEvent: false
   property var pendingDeleteEvent: null
   onShowAddEventChanged: {
@@ -64,6 +71,13 @@ Panel {
       newEventCol.customNthWeekday = Model.weekdayCodeForDate(root.selectedDate)
       newEventCol.customEndType = "never"
       newEventCol.customCount = 10
+      Qt.callLater(function() {
+        if (typeof eventTitleInput !== "undefined" && eventTitleInput) eventTitleInput.forceActiveFocus()
+      })
+    } else {
+      Qt.callLater(function() {
+        if (keyCatcher) keyCatcher.forceActiveFocus()
+      })
     }
   }
   property var calendars: []
@@ -172,11 +186,11 @@ Panel {
   }
 
   function close() {
-    setCenterHoverRevealSuppressed(false)
+    root.controller.hide()
     showSettings = false
     showAddEvent = false
     pendingDeleteEvent = null
-    root.controller.hide()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function toggle() {
@@ -191,8 +205,10 @@ Panel {
   }
 
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
-      root.bar.centerHoverRevealSuppressed = value
+    try {
+      if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+        root.bar.setCenterHoverRevealSuppressed(value)
+    } catch (e) {}
   }
 
   function refresh() {
@@ -270,7 +286,7 @@ Panel {
     startAuthProc.running = false
     startAuthProc.running = true
     if (root.currentAuthUrl && Model.isValidGoogleAuthUrl(root.currentAuthUrl)) {
-      Quickshell.execDetached(["xdg-open", "--", root.currentAuthUrl])
+      Quickshell.execDetached(["xdg-open", root.currentAuthUrl])
     }
   }
 
@@ -278,8 +294,9 @@ Panel {
     logoutProc.running = true
   }
 
-  function setCredentials(cId, cSecret) {
+  function setCredentials(cId, cSecret, autoStartAuth) {
     setCredsProc.stdinEnabled = true
+    setCredsProc.triggerAuthOnSuccess = !!autoStartAuth
     setCredsProc.payload = safePayload(JSON.stringify({
       client_id: String(cId || "").trim(),
       client_secret: String(cSecret || "").trim()
@@ -345,7 +362,33 @@ Panel {
     var cleanRrule = String(rrule || "").trim()
     var shouldAddMeet = !!addMeet
 
+    var genMeet = shouldAddMeet ? Model.generateMeetUrl() : ""
+    var finalMeet = Model.extractMeetUrl(cleanLoc) || Model.extractMeetUrl(cleanDesc) || genMeet
+
+    var optimisticEv = {
+      id: (root.isCloudConnected ? "temp_" : "ev_") + Date.now(),
+      summary: cleanSummary,
+      dateKey: cleanDateKey,
+      allDay: !!allDay,
+      startTime: String(startTime || "09:00").trim(),
+      endTime: String(endTime || "10:00").trim(),
+      calendarColor: cleanColor,
+      calendarName: cleanCalName,
+      location: cleanLoc,
+      description: cleanDesc,
+      meetUrl: finalMeet,
+      isLocal: !root.isCloudConnected,
+      isCloud: !!root.isCloudConnected,
+      isOptimistic: !!root.isCloudConnected,
+      calendarId: targetCalId
+    }
+
     if (root.isCloudConnected) {
+      var cList = root.cloudApiEvents ? root.cloudApiEvents.slice() : []
+      cList.push(optimisticEv)
+      root.cloudApiEvents = cList
+      recomputeExpandedEvents()
+
       createCloudEventProc.stdinEnabled = true
       createCloudEventProc.payload = safePayload(JSON.stringify({
         summary: cleanSummary,
@@ -362,31 +405,17 @@ Panel {
       createCloudEventProc.running = false
       createCloudEventProc.running = true
     } else {
-      var genMeet = shouldAddMeet ? Model.generateMeetUrl() : ""
-      var finalMeet = Model.extractMeetUrl(cleanLoc) || Model.extractMeetUrl(cleanDesc) || genMeet
-      var newEv = {
-        id: "ev_" + Date.now(),
-        summary: cleanSummary,
-        dateKey: cleanDateKey,
-        allDay: !!allDay,
-        startTime: String(startTime || "09:00").trim(),
-        endTime: String(endTime || "10:00").trim(),
-        calendarColor: cleanColor,
-        calendarName: cleanCalName,
-        location: cleanLoc,
-        description: cleanDesc,
-        meetUrl: finalMeet,
-        isLocal: true,
-        isCloud: false
-      }
       var list = root.localEvents ? root.localEvents.slice() : []
-      list.push(newEv)
+      list.push(optimisticEv)
       root.localEvents = list
       saveLocalEvents()
+      recomputeExpandedEvents()
     }
 
     root.showAddEvent = false
-    recomputeExpandedEvents()
+    Qt.callLater(function() {
+      if (keyCatcher) keyCatcher.forceActiveFocus()
+    })
   }
 
   function requestDeleteEvent(ev) {
@@ -713,12 +742,12 @@ Panel {
   }
 
   function openGoogleCalendar() {
-    Quickshell.execDetached(["xdg-open", "--", "https://calendar.google.com"])
+    Quickshell.execDetached(["xdg-open", "https://calendar.google.com"])
   }
 
   function openMeetLink(meetUrl) {
     if (meetUrl && Model.isValidMeetingUrl(meetUrl)) {
-      Quickshell.execDetached(["xdg-open", "--", String(meetUrl).trim()])
+      Quickshell.execDetached(["xdg-open", String(meetUrl).trim()])
     }
   }
 
@@ -777,20 +806,14 @@ Panel {
   Process {
     id: startAuthProc
     command: ["python3", root.gcalSyncBin, "auth"]
-    stdout: StdioCollector {
-      waitForEnd: false
-      onStreamFinished: {
-        var raw = String(text || "")
-        if (raw.indexOf("AUTH_URL:") !== -1) {
-          var lines = raw.split("\n")
-          for (var i = 0; i < lines.length; i++) {
-            if (lines[i].indexOf("AUTH_URL:") === 0) {
-              var u = lines[i].substring(9).trim()
-              if (Model.isValidGoogleAuthUrl(u)) {
-                root.currentAuthUrl = u
-                Quickshell.execDetached(["xdg-open", "--", u])
-              }
-            }
+    stdout: SplitParser {
+      onRead: function(line) {
+        var raw = String(line || "").trim()
+        if (raw.indexOf("AUTH_URL:") === 0) {
+          var u = raw.substring(9).trim()
+          if (Model.isValidGoogleAuthUrl(u)) {
+            root.currentAuthUrl = u
+            Quickshell.execDetached(["xdg-open", u])
           }
         }
       }
@@ -821,6 +844,7 @@ Panel {
     command: ["python3", root.gcalSyncBin, "set-credentials"]
     stdinEnabled: true
     property string payload: ""
+    property bool triggerAuthOnSuccess: false
     onStarted: {
       write(payload + "\n")
       payload = ""
@@ -830,6 +854,10 @@ Panel {
       stdinEnabled = true
       root.checkAuthStatus()
       root.showClientConfig = false
+      if (exitCode === 0 && triggerAuthOnSuccess) {
+        triggerAuthOnSuccess = false
+        Qt.callLater(function() { root.startGoogleAuth() })
+      }
     }
   }
 
@@ -938,9 +966,18 @@ Panel {
     }
     onExited: function(exitCode, exitStatus) {
       stdinEnabled = true
-      Qt.callLater(function() {
-        root.syncAllCalendars()
-      })
+      if (exitCode !== 0) {
+        var filtered = []
+        for (var i = 0; i < root.cloudApiEvents.length; i++) {
+          if (!root.cloudApiEvents[i].isOptimistic) filtered.push(root.cloudApiEvents[i])
+        }
+        root.cloudApiEvents = filtered
+        root.recomputeExpandedEvents()
+      } else {
+        Qt.callLater(function() {
+          root.syncAllCalendars()
+        })
+      }
     }
   }
 
@@ -1042,6 +1079,18 @@ Panel {
     }
   }
 
+  readonly property bool isInputActive: {
+    if (typeof eventTitleInput !== "undefined" && eventTitleInput && eventTitleInput.activeFocus) return true
+    if (typeof startTimeInput !== "undefined" && startTimeInput && startTimeInput.activeFocus) return true
+    if (typeof endTimeInput !== "undefined" && endTimeInput && endTimeInput.activeFocus) return true
+    if (typeof eventLocationInput !== "undefined" && eventLocationInput && eventLocationInput.activeFocus) return true
+    if (typeof clientIdInput !== "undefined" && clientIdInput && clientIdInput.activeFocus) return true
+    if (typeof clientSecretInput !== "undefined" && clientSecretInput && clientSecretInput.activeFocus) return true
+    if (typeof calNameInput !== "undefined" && calNameInput && calNameInput.activeFocus) return true
+    if (typeof calUrlInput !== "undefined" && calUrlInput && calUrlInput.activeFocus) return true
+    return false
+  }
+
   // ---- Main Panel Layout
   KeyboardPanel {
     id: panel
@@ -1057,19 +1106,34 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: root.isInputActive
       onMoveRequested: function(dx, dy) {
+        if (root.showAddEvent || root.showSettings || root.pendingDeleteEvent) return
         if (dx !== 0) root.moveMonth(dx)
         if (dy !== 0) root.moveYear(dy)
       }
-      onActivateRequested: root.goToToday()
+      onActivateRequested: {
+        if (root.showAddEvent || root.showSettings || root.pendingDeleteEvent) return
+        root.goToToday()
+      }
       onCloseRequested: {
         if (root.pendingDeleteEvent) root.pendingDeleteEvent = null
-        else if (root.showAddEvent) root.showAddEvent = false
-        else if (root.showSettings) root.showSettings = false
+        else if (root.showAddEvent) {
+          root.showAddEvent = false
+          Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+        }
+        else if (root.showSettings) {
+          root.showSettings = false
+          Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+        }
         else root.close()
       }
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTabRequested: function(direction) {
+        if (root.showAddEvent || root.showSettings) return
+        root.switchPanel(direction)
+      }
       onTextKey: function(t) {
+        if (root.showAddEvent || root.showSettings || root.pendingDeleteEvent) return
         if (t === "[") root.moveMonth(-1)
         else if (t === "]") root.moveMonth(1)
         else if (t === "{") root.moveYear(-1)
@@ -1213,6 +1277,15 @@ Panel {
                     root.checkAuthStatus()
                   }
                 }
+              }
+
+              // Close Panel Button
+              PanelActionButton {
+                iconText: "󰅖"
+                tooltipText: "Close Calendar (Esc)"
+                foreground: root.contentForeground
+                fontFamily: root.contentFontFamily
+                onClicked: root.close()
               }
             }
           }
@@ -1721,6 +1794,16 @@ Panel {
                     placeholderText: "Event title (e.g. Sync Meeting, Dentist)"
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
+                    Keys.onEscapePressed: function(event) {
+                      event.accepted = true
+                      root.showAddEvent = false
+                      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                    }
+                    onAccepted: {
+                      if (eventTitleInput.text.trim()) {
+                        createBtn.clicked()
+                      }
+                    }
                   }
 
                   // All Day Switch + Time Range Inputs
@@ -1760,6 +1843,11 @@ Panel {
                         placeholderText: "09:00"
                         foreground: root.contentForeground
                         font.family: root.contentFontFamily
+                        Keys.onEscapePressed: function(event) {
+                          event.accepted = true
+                          root.showAddEvent = false
+                          Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                        }
                       }
 
                       Text {
@@ -1778,6 +1866,11 @@ Panel {
                         placeholderText: "10:00"
                         foreground: root.contentForeground
                         font.family: root.contentFontFamily
+                        Keys.onEscapePressed: function(event) {
+                          event.accepted = true
+                          root.showAddEvent = false
+                          Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                        }
                       }
                     }
                   }
@@ -1789,6 +1882,16 @@ Panel {
                     placeholderText: "Location or Google Meet / Zoom link (Optional)"
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
+                    Keys.onEscapePressed: function(event) {
+                      event.accepted = true
+                      root.showAddEvent = false
+                      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                    }
+                    onAccepted: {
+                      if (eventTitleInput.text.trim()) {
+                        createBtn.clicked()
+                      }
+                    }
                   }
 
                   // Video Meeting / Google Meet Option
@@ -4263,8 +4366,11 @@ Panel {
                       iconText: "󰌷"
                       foreground: root.contentForeground
                       onClicked: {
-                        if (root.currentAuthUrl && Model.isValidGoogleAuthUrl(root.currentAuthUrl)) Quickshell.execDetached(["xdg-open", "--", root.currentAuthUrl])
-                        else root.startGoogleAuth()
+                        if (root.currentAuthUrl && Model.isValidGoogleAuthUrl(root.currentAuthUrl)) {
+                          Quickshell.execDetached(["xdg-open", root.currentAuthUrl])
+                        } else {
+                          root.startGoogleAuth()
+                        }
                       }
                     }
                   }
@@ -4291,6 +4397,11 @@ Panel {
                     placeholderText: "Google Client ID (e.g. 123456789-xxx.apps.googleusercontent.com)"
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
+                    Keys.onEscapePressed: function(event) {
+                      event.accepted = true
+                      root.showSettings = false
+                      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                    }
                   }
 
                   TextField {
@@ -4300,6 +4411,11 @@ Panel {
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
                     password: true
+                    Keys.onEscapePressed: function(event) {
+                      event.accepted = true
+                      root.showSettings = false
+                      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                    }
                   }
 
                   Row {
@@ -4313,8 +4429,7 @@ Panel {
                       accent: Color.accent
                       onClicked: {
                         if (clientIdInput.text.trim() && clientSecretInput.text.trim()) {
-                          root.setCredentials(clientIdInput.text.trim(), clientSecretInput.text.trim())
-                          Qt.callLater(function() { root.startGoogleAuth() })
+                          root.setCredentials(clientIdInput.text.trim(), clientSecretInput.text.trim(), true)
                         }
                       }
                     }
@@ -4460,6 +4575,11 @@ Panel {
                     placeholderText: "Name (e.g. Work)"
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
+                    Keys.onEscapePressed: function(event) {
+                      event.accepted = true
+                      root.showSettings = false
+                      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                    }
                   }
 
                   TextField {
@@ -4468,6 +4588,11 @@ Panel {
                     placeholderText: "Paste Google Calendar iCal / Secret URL"
                     foreground: root.contentForeground
                     font.family: root.contentFontFamily
+                    Keys.onEscapePressed: function(event) {
+                      event.accepted = true
+                      root.showSettings = false
+                      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+                    }
                   }
                 }
 

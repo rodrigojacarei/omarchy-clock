@@ -19,7 +19,7 @@ fi
 
 if [ -x "/usr/share/omarchy/bin/omarchy-notification-send" ]; then
   if [ "$VALID_MEET" -eq 1 ]; then
-    /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰕧}" -u "$URGENCY" "$TITLE" "$BODY" --exec xdg-open -- "$MEET_URL" 2>/dev/null
+    /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰕧}" -u "$URGENCY" "$TITLE" "$BODY" --exec xdg-open "$MEET_URL" 2>/dev/null
   else
     /usr/share/omarchy/bin/omarchy-notification-send -g "${GLYPH:-󰃭}" -u "$URGENCY" "$TITLE" "$BODY" 2>/dev/null
   fi

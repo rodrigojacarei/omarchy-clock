@@ -665,9 +665,13 @@ def start_oauth_flow():
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
 
     try:
-        subprocess.Popen(["xdg-open", "--", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["xdg-open", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
-        print(f"AUTH_URL:{auth_url}", flush=True)
+        try:
+            import webbrowser
+            webbrowser.open(auth_url)
+        except Exception:
+            pass
 
     print(f"AUTH_URL:{auth_url}", flush=True)
 
@@ -814,6 +818,20 @@ def get_system_timezone():
             pass
     return "America/Sao_Paulo"
 
+def normalize_time_str(t_str, default="09:00"):
+    t_str = str(t_str or "").strip()
+    if not t_str:
+        return default
+    parts = t_str.split(":")
+    if len(parts) >= 2:
+        try:
+            h = int(parts[0])
+            m = int(parts[1])
+            return f"{h:02d}:{m:02d}"
+        except ValueError:
+            pass
+    return default
+
 def create_cloud_event(summary, date_key, all_day=False, start_time="09:00", end_time="10:00", location="", description="", calendar_id="primary", rrule="", add_meet=False):
     token = get_valid_access_token()
     if not token:
@@ -827,7 +845,7 @@ def create_cloud_event(summary, date_key, all_day=False, start_time="09:00", end
     sys_tz = get_system_timezone()
 
     event_body = {
-        "summary": summary,
+        "summary": summary or "Untitled Event",
         "description": description or "",
         "location": location or ""
     }
@@ -850,11 +868,32 @@ def create_cloud_event(summary, date_key, all_day=False, start_time="09:00", end
     if all_day:
         dt_start = datetime.strptime(date_key, "%Y-%m-%d")
         dt_end = dt_start + timedelta(days=1)
-        event_body["start"] = {"date": date_key, "timeZone": sys_tz}
-        event_body["end"] = {"date": dt_end.strftime("%Y-%m-%d"), "timeZone": sys_tz}
+        event_body["start"] = {"date": date_key}
+        event_body["end"] = {"date": dt_end.strftime("%Y-%m-%d")}
     else:
-        event_body["start"] = {"dateTime": f"{date_key}T{start_time}:00{tz_formatted}", "timeZone": sys_tz}
-        event_body["end"] = {"dateTime": f"{date_key}T{end_time}:00{tz_formatted}", "timeZone": sys_tz}
+        norm_start = normalize_time_str(start_time, "09:00")
+        norm_end = normalize_time_str(end_time, "10:00")
+        try:
+            sh, sm = int(norm_start.split(":")[0]), int(norm_start.split(":")[1])
+            eh, em = int(norm_end.split(":")[0]), int(norm_end.split(":")[1])
+            if (eh * 60 + em) <= (sh * 60 + sm):
+                eh = (sh + 1) % 24
+                em = sm
+                norm_end = f"{eh:02d}:{em:02d}"
+                if eh < sh:
+                    dt_end_day = datetime.strptime(date_key, "%Y-%m-%d") + timedelta(days=1)
+                    end_date_key = dt_end_day.strftime("%Y-%m-%d")
+                else:
+                    end_date_key = date_key
+            else:
+                end_date_key = date_key
+        except Exception:
+            norm_start = "09:00"
+            norm_end = "10:00"
+            end_date_key = date_key
+
+        event_body["start"] = {"dateTime": f"{date_key}T{norm_start}:00{tz_formatted}", "timeZone": sys_tz}
+        event_body["end"] = {"dateTime": f"{end_date_key}T{norm_end}:00{tz_formatted}", "timeZone": sys_tz}
 
     data = json.dumps(event_body).encode("utf-8")
     encoded_id = urllib.parse.quote(calendar_id or "primary", safe="")
@@ -878,9 +917,39 @@ def create_cloud_event(summary, date_key, all_day=False, start_time="09:00", end
             created = json.loads(body)
             sanitized = sanitize_event_item(created, cal_id=calendar_id)
             print(f"EVENT_CREATED:{sanitized.get('id')}", flush=True)
-            list_cloud_events()
+            api_events = safe_read_json(API_CACHE_FILE, default=[])
+            if isinstance(api_events, list):
+                api_events.append(sanitized)
+                atomic_write_json(API_CACHE_FILE, api_events, mode=0o600)
             return sanitized
     except urllib.error.HTTPError as e:
+        if add_meet and e.code in (400, 403) and "conferenceData" in event_body:
+            # Fallback without conferenceData if Meet creation failed
+            del event_body["conferenceData"]
+            url_no_conf = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events"
+            data_no_conf = json.dumps(event_body).encode("utf-8")
+            req_fallback = urllib.request.Request(
+                url_no_conf,
+                data=data_no_conf,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req_fallback, timeout=15) as resp:
+                    body = read_bounded_http_response(resp, max_bytes=256 * 1024)
+                    created = json.loads(body)
+                    sanitized = sanitize_event_item(created, cal_id=calendar_id)
+                    print(f"EVENT_CREATED:{sanitized.get('id')}", flush=True)
+                    api_events = safe_read_json(API_CACHE_FILE, default=[])
+                    if isinstance(api_events, list):
+                        api_events.append(sanitized)
+                        atomic_write_json(API_CACHE_FILE, api_events, mode=0o600)
+                    return sanitized
+            except Exception as e_retry:
+                print(f"Error creating event retry without Meet: {e_retry}", file=sys.stderr)
         body = ""
         try:
             body = read_bounded_http_response(e, max_bytes=16 * 1024)

@@ -276,7 +276,7 @@ BarWidget {
         root.cycleFormat()
       } else if (b === Qt.MiddleButton) {
         if (root.nextEvent && root.nextEvent.meetUrl && Model.isValidMeetingUrl(root.nextEvent.meetUrl)) {
-          Quickshell.execDetached(["xdg-open", "--", String(root.nextEvent.meetUrl).trim()])
+          Quickshell.execDetached(["xdg-open", String(root.nextEvent.meetUrl).trim()])
         } else if (root.bar) {
           root.bar.run("omarchy-menu-timezone")
         }
