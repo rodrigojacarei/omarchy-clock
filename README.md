@@ -82,26 +82,7 @@ When deleting a repeating event, an interactive dialog prompts you to choose the
 
 ## ⚡ Google Calendar Setup Guide
 
-### Option A: Fast Setup via Google Workspace CLI (`gws`)
-
-You can use the official community [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli) to configure OAuth credentials directly from your terminal:
-
-```bash
-# 1. Install Google Workspace CLI
-npm install -g @googleworkspace/cli
-
-# 2. Run guided setup to configure Google Cloud project & OAuth credentials
-gws auth setup
-
-# 3. Authenticate with Google Calendar
-gws auth login --services calendar
-```
-
-After setup, copy your **Client ID** and **Client Secret** into the Clock panel settings (**Settings ⚙️** → **Configure Client ID & Secret**), or place `client_secret.json` in `~/.config/omarchy-clock/client_secret.json`.
-
----
-
-### Option B: Fast Setup via Google Cloud CLI (`gcloud`)
+### Option A: Fast Setup via Google Cloud CLI (`gcloud`)
 
 ```bash
 # 1. Create a project and set as active
@@ -118,9 +99,11 @@ gcloud iam oauth-client-ids create omarchy-clock \
   --description="Omarchy Clock Desktop Client"
 ```
 
+After setup, copy your **Client ID** and **Client Secret** into the Clock panel settings (**Settings ⚙️** → **Configure Client ID & Secret**), or place `client_secret.json` in `~/.config/omarchy-clock/client_secret.json`.
+
 ---
 
-### Option C: Manual Google Cloud Console Setup (Web GUI)
+### Option B: Manual Google Cloud Console Setup (Web GUI)
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (e.g. `Omarchy Calendar`).
@@ -159,9 +142,12 @@ omarchy plugin add https://github.com/rodrigojacarei/omarchy-clock.git --enable
 
 ### Option 2: Manual Installation / Local Development
 
+Copy or link the plugin directory into your Omarchy plugins folder:
+
 ```bash
-# 1. Clone repository into Omarchy plugins directory
-git clone https://github.com/rodrigojacarei/omarchy-clock.git ~/.config/omarchy/plugins/omarchy-clock
+# 1. Copy or link plugin into Omarchy plugins directory
+mkdir -p ~/.config/omarchy/plugins
+cp -r /path/to/omarchy-clock ~/.config/omarchy/plugins/omarchy-clock
 
 # 2. Symlink CLI helper and desktop application launcher
 mkdir -p ~/.local/bin ~/.local/share/applications
